@@ -1,0 +1,7 @@
+opportunities_*
+__pycache__/
+*.pyc
+
+cache/
+venv/
+.env
