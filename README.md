@@ -91,10 +91,29 @@ Run the screener:
 python main.py
 ```
 
-Clear the cache:
+### Command Line Options
+
+**Clear all cached data:**
 ```bash
 python main.py --clear-cache-all
 ```
+Clears all cached API responses (watchlists, expirations, option chains, market metrics, quotes) from the `cache/` directory and exits.
+
+**Fresh day run (recommended for morning runs):**
+```bash
+python main.py --fresh-day
+```
+Clears stale cache entries from previous days, syncs current open positions from your account, displays P/L with alerts for profit targets (≥50%) and approaching expiration (≤21 DTE), then continues to opportunity screener. Best for morning routine to get full picture of current positions and new opportunities.
+
+**Market Status**: Automatically detected based on US Eastern Time (9:30 AM - 4:00 PM ET, weekdays). After-hours results include `_indicative` filename suffix and status banner: "🔕 MARKET STATUS: CLOSED ⚠ Results are indicative only - bid/ask spreads may be stale"
+
+**Rejection Tracking**: All rejection counters (delta bounds, bid/ask width, premium, risk/reward, etc.) are automatically logged to `rejections/rejections_tracking.csv` for analysis of filter bottlenecks.
+
+**Sync positions only (skip screener):**
+```bash
+python main.py --sync-positions
+```
+Fetches current account positions, parses option spreads, displays P/L summary with alerts, and saves to `trades/trades_open.csv`. Use this for quick position checks without running the full screener.
 
 The screener will:
 1. Authenticate with Tastytrade API

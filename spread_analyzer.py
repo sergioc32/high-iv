@@ -29,40 +29,16 @@ class SpreadAnalyzer:
         self.max_long_bid_ask_width_pct = config.MAX_LONG_LEG_BID_ASK_WIDTH_PCT
         # Credit per width requirement
         self.min_credit_per_width = config.MIN_CREDIT_PER_WIDTH
-        self.enable_oi_filter = getattr(config, "ENABLE_OI_FILTER", True)
-        fallback_oi_per_leg = getattr(config, "MIN_OPTION_OPEN_INTEREST_PER_LEG", 0)
         self.min_option_open_interest_short_leg = getattr(
             config,
             "MIN_OPTION_OPEN_INTEREST_SHORT_LEG",
-            fallback_oi_per_leg,
+            config.MIN_OPTION_OPEN_INTEREST_PER_LEG,
         )
         self.min_option_open_interest_long_leg = getattr(
             config,
             "MIN_OPTION_OPEN_INTEREST_LONG_LEG",
-            fallback_oi_per_leg,
+            config.MIN_OPTION_OPEN_INTEREST_PER_LEG,
         )
-        # Run-level diagnostics: symbol -> rejection counters when no valid spread is found.
-        self.strategy_rejections_by_symbol: Dict[str, Dict[str, int]] = {}
-
-    @staticmethod
-    def _format_rejection_summary(rejections: Dict[str, int]) -> str:
-        """Format non-zero rejection counters into a one-line summary string."""
-        order = [
-            ("delta_bounds", "Δ"),
-            ("open_interest", "oi"),
-            ("short_bid_ask_width", "short_ba"),
-            ("long_bid_ask_width", "long_ba"),
-            ("credit_conservative", "credit"),
-            ("premium_zero_or_negative", "prem"),
-            ("risk_reward", "r/r"),
-            ("no_long_strike", "no_long"),
-        ]
-        parts = [
-            f"{label}={rejections.get(key, 0)}"
-            for key, label in order
-            if rejections.get(key, 0) > 0
-        ]
-        return ", ".join(parts) if parts else "no tracked rejections"
 
     def log_rejections(self, symbol: str, rejections: Dict) -> None:
         """
@@ -322,14 +298,13 @@ class SpreadAnalyzer:
                 continue
 
             # Filter 2: Minimum open interest on short leg
-            if self.enable_oi_filter:
-                short_open_interest = put_data.get("open_interest")
-                if (
-                    short_open_interest is None
-                    or short_open_interest < self.min_option_open_interest_short_leg
-                ):
-                    rejections["open_interest"] += 1
-                    continue
+            short_open_interest = put_data.get("open_interest")
+            if (
+                short_open_interest is None
+                or short_open_interest < self.min_option_open_interest_short_leg
+            ):
+                rejections["open_interest"] += 1
+                continue
 
             # Filter 3: Bid/ask width on short leg (stricter threshold)
             short_bid = put_data.get("bid")
@@ -393,14 +368,13 @@ class SpreadAnalyzer:
                 continue
 
             # Filter 4: Minimum open interest on long leg
-            if self.enable_oi_filter:
-                long_open_interest = long_put_data.get("open_interest")
-                if (
-                    long_open_interest is None
-                    or long_open_interest < self.min_option_open_interest_long_leg
-                ):
-                    rejections["open_interest"] += 1
-                    continue
+            long_open_interest = long_put_data.get("open_interest")
+            if (
+                long_open_interest is None
+                or long_open_interest < self.min_option_open_interest_long_leg
+            ):
+                rejections["open_interest"] += 1
+                continue
 
             # Filter 5: Bid/ask width on long leg (looser threshold)
             long_bid = long_put_data.get("bid")
@@ -461,12 +435,17 @@ class SpreadAnalyzer:
             if debug_symbol:
                 total_rejected = sum(rejections.values())
                 if total_rejected > 0:
-                    self.strategy_rejections_by_symbol[debug_symbol] = dict(rejections)
                     self.log_rejections(debug_symbol, rejections)
-                    rejection_summary = self._format_rejection_summary(rejections)
                     print(
                         f"\n   ✗ {debug_symbol}: No valid spreads found. Rejections: "
-                        f"{rejection_summary}"
+                        f"Δ={rejections['delta_bounds']}, "
+                        f"oi={rejections['open_interest']}, "
+                        f"short_ba={rejections['short_bid_ask_width']}, "
+                        f"long_ba={rejections['long_bid_ask_width']}, "
+                        f"credit={rejections['credit_conservative']}, "
+                        f"prem={rejections['premium_zero_or_negative']}, "
+                        f"r/r={rejections['risk_reward']}, "
+                        f"no_long={rejections['no_long_strike']}"
                     )
             return None
 

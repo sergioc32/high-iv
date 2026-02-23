@@ -154,16 +154,6 @@ class TastytradeAPI:
         except Exception:
             return None
 
-    def _print_postman_setup(self, authorization_value: str) -> None:
-        """Print Postman Authorization header details for manual API testing."""
-        print("=" * 80)
-        print("📋 POSTMAN SETUP - Copy this token for Authorization header:")
-        print("=" * 80)
-        print("Header Name:  Authorization")
-        print(f"Header Value: {authorization_value}")
-        print("=" * 80)
-        print()
-
     def _is_token_expired(self, token: str, leeway_seconds: int = 60) -> bool:
         payload = self._decode_jwt_payload(token)
         if not payload:
@@ -210,7 +200,15 @@ class TastytradeAPI:
                     print()
                     print("✓ Using cached session token")
                     print()
-                    self._print_postman_setup(auth_value)
+                    print("=" * 80)
+                    print(
+                        "📋 POSTMAN SETUP - Copy this token for Authorization header:"
+                    )
+                    print("=" * 80)
+                    print("Header Name:  Authorization")
+                    print(f"Header Value: {self.session_token}")
+                    print("=" * 80)
+                    print()
                     return True
 
             if client_id and client_secret and refresh_token:
@@ -277,7 +275,6 @@ class TastytradeAPI:
         print()
         print("✓ Successfully authenticated with Tastytrade (OAuth)")
         print()
-        self._print_postman_setup(auth_value)
         return True
 
     def list_watchlists(
@@ -401,11 +398,7 @@ class TastytradeAPI:
                     cache_dir=config.CACHE_DIR,
                 )
                 if cached:
-                    # Refresh stale cache entries that predate added fields.
-                    if "earnings_date" not in cached or "market_cap" not in cached:
-                        symbols_to_fetch.append(sym)
-                    else:
-                        metrics_by_symbol[sym] = cached
+                    metrics_by_symbol[sym] = cached
                 else:
                     symbols_to_fetch.append(sym)
 
@@ -421,13 +414,6 @@ class TastytradeAPI:
                     symbol = item["symbol"]
                     iv_rank_raw = item.get("implied-volatility-index-rank")
                     iv_percentile_raw = item.get("implied-volatility-percentile")
-                    market_cap_raw = (
-                        item.get("market-cap")
-                        or item.get("market_cap")
-                        or item.get("marketCapitalization")
-                    )
-                    earnings = item.get("earnings") or {}
-                    earnings_date = earnings.get("expected-report-date")
                     iv_rank = float(iv_rank_raw) * 100 if iv_rank_raw else None
                     iv_percentile = (
                         float(iv_percentile_raw) * 100 if iv_percentile_raw else None
@@ -439,10 +425,6 @@ class TastytradeAPI:
                         "iv_index": item.get("implied-volatility-index"),
                         "liquidity_rating": item.get("liquidity-rating"),
                         "liquidity_value": item.get("liquidity-value"),
-                        "market_cap": float(market_cap_raw)
-                        if market_cap_raw is not None
-                        else None,
-                        "earnings_date": earnings_date,
                     }
                     metrics_by_symbol[symbol] = record
                     cache.set(f"metrics:{symbol}", record, cache_dir=config.CACHE_DIR)
@@ -508,12 +490,55 @@ class TastytradeAPI:
 
             if symbols_to_fetch:
                 batch_size = config.EQUITY_QUOTE_BATCH_SIZE
+                url = f"{self.BASE_URL}/market-data/by-type"
+
                 for i in range(0, len(symbols_to_fetch), batch_size):
                     batch = symbols_to_fetch[i : i + batch_size]
-                    batch_quotes = self._fetch_equity_quotes_resilient(batch)
-                    for symbol, record in batch_quotes.items():
-                        quotes_by_symbol[symbol] = record
-                        cache.set(f"quote:{symbol}", record, cache_dir=config.CACHE_DIR)
+                    symbols_str = ",".join(batch)
+                    params = {"equity": symbols_str}
+
+                    try:
+                        response = self.session.get(url, params=params)
+                        response.raise_for_status()
+                        data = response.json()
+                        self._debug_print(
+                            f"Equity Quotes Response for batch {i // batch_size + 1}",
+                            data,
+                        )
+                        items = data["data"]["items"]
+
+                        for q in items:
+                            symbol = q.get("symbol")
+                            market_cap_raw = (
+                                q.get("market-cap")
+                                or q.get("market_cap")
+                                or q.get("market-capitalization")
+                                or q.get("marketCapitalization")
+                            )
+                            record = {
+                                "symbol": symbol,
+                                "last_price": float(q.get("last"))
+                                if q.get("last")
+                                else None,
+                                "bid": float(q.get("bid")) if q.get("bid") else None,
+                                "ask": float(q.get("ask")) if q.get("ask") else None,
+                                "volume": float(q.get("volume"))
+                                if q.get("volume")
+                                else None,
+                                "market_cap": float(market_cap_raw)
+                                if market_cap_raw
+                                else None,
+                                "is_trading_halted": q.get("is-trading-halted", False),
+                            }
+                            quotes_by_symbol[symbol] = record
+                            cache.set(
+                                f"quote:{symbol}", record, cache_dir=config.CACHE_DIR
+                            )
+                    except requests.exceptions.RequestException as chunk_error:
+                        print(
+                            f"⚠ Failed to get equity quote batch {i // batch_size + 1}: {chunk_error}"
+                        )
+                        continue
 
                 # Fallback: fetch any still-missing symbols one-by-one so a failed batch
                 # does not silently drop valid candidates from downstream analysis.
@@ -536,83 +561,6 @@ class TastytradeAPI:
             return quotes_by_symbol
         except requests.exceptions.RequestException as e:
             print(f"✗ Failed to get batch quotes: {e}")
-            return {}
-
-    def _parse_equity_quote_item(self, requested_symbol: str, quote_item: Dict) -> Dict:
-        """Parse one equity quote item into the canonical quote record format."""
-        market_cap_raw = (
-            quote_item.get("market-cap")
-            or quote_item.get("market_cap")
-            or quote_item.get("market-capitalization")
-            or quote_item.get("marketCapitalization")
-        )
-        return {
-            "symbol": requested_symbol,
-            "last_price": float(quote_item.get("last"))
-            if quote_item.get("last")
-            else None,
-            "bid": float(quote_item.get("bid")) if quote_item.get("bid") else None,
-            "ask": float(quote_item.get("ask")) if quote_item.get("ask") else None,
-            "volume": float(quote_item.get("volume"))
-            if quote_item.get("volume")
-            else None,
-            "market_cap": float(market_cap_raw) if market_cap_raw else None,
-            "is_trading_halted": quote_item.get("is-trading-halted", False),
-        }
-
-    def _fetch_equity_quotes_resilient(self, symbols: List[str]) -> Dict[str, Dict]:
-        """
-        Fetch equity quotes for a symbol list.
-        If a batch fails with HTTP 400, recursively split to isolate problematic symbols.
-        """
-        if not symbols:
-            return {}
-
-        symbols_str = ",".join(symbols)
-        url = f"{self.BASE_URL}/market-data/by-type"
-        params = {"equity": symbols_str}
-
-        try:
-            response = self.session.get(url, params=params)
-            response.raise_for_status()
-            data = response.json()
-            items = data["data"].get("items", [])
-
-            requested_map = {sym.upper(): sym for sym in symbols}
-            normalized_map = {sym.replace("/", ".").upper(): sym for sym in symbols}
-
-            parsed_quotes: Dict[str, Dict] = {}
-            for item in items:
-                response_symbol = str(item.get("symbol") or "")
-                key_upper = response_symbol.upper()
-                requested_symbol = (
-                    requested_map.get(key_upper)
-                    or normalized_map.get(key_upper)
-                    or response_symbol
-                )
-                parsed_quotes[requested_symbol] = self._parse_equity_quote_item(
-                    requested_symbol, item
-                )
-
-            return parsed_quotes
-
-        except requests.exceptions.RequestException as error:
-            status_code = getattr(getattr(error, "response", None), "status_code", None)
-            if status_code == 400 and len(symbols) > 1:
-                mid = len(symbols) // 2
-                left = self._fetch_equity_quotes_resilient(symbols[:mid])
-                right = self._fetch_equity_quotes_resilient(symbols[mid:])
-                combined = {}
-                combined.update(left)
-                combined.update(right)
-                return combined
-
-            if len(symbols) == 1:
-                print(f"⚠ Failed to get equity quote for {symbols[0]}: {error}")
-            else:
-                print(
-                    f"⚠ Failed to get equity quote batch ({len(symbols)} symbols): {error}"
-                )
             return {}
 
     def get_option_expirations(self, symbol: str) -> List[Dict]:

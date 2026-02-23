@@ -135,7 +135,32 @@ This document outlines the design and architecture of the High IV Options Screen
 
 **Design**: Single source of truth for tuneable parameters
 
-### 6. Caching (`utils/cache.py`)
+### 4. Utilities Layer (`utils/`)
+
+#### 4.1 Display Module (`display.py`)
+
+**Responsibility**: Formatted console output and result presentation
+
+**Key Functions**:
+- `print_header()`: Section dividers and status messages
+- `display_opportunities()`: Formatted table of trade opportunities
+- `display_summary()`: Execution summary statistics
+- `print_progress()`: Progress indicators with spinner
+
+#### 4.2 Market Hours Module (`market_hours.py`)
+
+**Responsibility**: Detect market status for data quality flagging
+
+**Key Functions**:
+- `is_market_open()`: Returns True if US market currently open (9:30 AM - 4:00 PM ET, weekdays)
+- `get_market_status_display()`: Returns 'OPEN' or 'CLOSED' for banner display
+
+**Integration**:
+- Called at screener start to set market context
+- After-hours results saved with `_indicative` filename suffix
+- Banner displayed: "🔕 MARKET STATUS: CLOSED ⚠ Results are indicative only"
+
+#### 4.3 Cache Module (`cache.py`)
 
 **Responsibility**: Lightweight file-based cache for API responses
 
@@ -180,14 +205,42 @@ Option Quotes API (batch) → Greeks & Pricing
 Spread Evaluation → Risk/Reward Calculation
      ↓
 Filtering → Final Opportunities
+     ↓
+Rejection Tracking → CSV log (rejections_tracking.csv)
 ```
 
 ### Phase 4: Output
 ```
-Opportunities → Console Display
+Opportunities → Console Display + Market Status Banner
                      ↓
-              CSV Export (optional)
+              CSV Export (with _indicative suffix if after-hours)
+              
+Rejections → Append to rejections/rejections_tracking.csv
 ```
+
+## Rejection Tracking System
+
+**Purpose**: Diagnose filter bottlenecks and calibrate constraints
+
+**Location**: `rejections/rejections_tracking.csv`
+
+**Columns**:
+- `timestamp`: When rejection occurred
+- `symbol`: Stock symbol analyzed
+- `delta_bounds`: Count rejected for delta outside [MIN_DELTA, MAX_DELTA]
+- `short_bid_ask_width`: Count rejected for short leg bid/ask too wide
+- `long_bid_ask_width`: Count rejected for long leg bid/ask too wide
+- `premium_zero_or_negative`: Count rejected for invalid premium
+- `risk_reward`: Count rejected for risk/reward > MAX_RISK_REWARD_RATIO
+- `no_long_strike`: Count rejected for unavailable long strike
+- `total_rejections`: Sum of all rejection categories
+
+**Data Interpretation**:
+- With `SKEW_WINDOW=1`: Max 3 candidates per filter
+- With `SKEW_WINDOW=2`: Max 5 candidates per filter
+- High `short_bid_ask_width` + `long_bid_ask_width` on choppy days → liquidity filter too strict
+- High `delta_bounds` → delta window too narrow
+- Cascading counts show filter pipeline effectiveness
 
 ## Design Patterns
 

@@ -10,7 +10,6 @@ import config
 class IVScreener:
     def __init__(self, iv_rank_threshold: float = config.IV_RANK_THRESHOLD):
         self.iv_rank_threshold = iv_rank_threshold
-        self.min_stock_price = getattr(config, "MIN_STOCK_PRICE", 10.0)
         self.min_underlying_volume = config.MIN_UNDERLYING_VOLUME
         self.min_market_cap = config.MIN_MARKET_CAP
 
@@ -26,15 +25,7 @@ class IVScreener:
         df = pd.DataFrame.from_dict(metrics_data, orient="index")
 
         # Ensure numeric types (API may return strings)
-        for col in [
-            "iv_rank",
-            "iv_percentile",
-            "iv_index",
-            "volume",
-            "market_cap",
-            "last",
-            "last_price",
-        ]:
+        for col in ["iv_rank", "iv_percentile", "iv_index", "volume", "market_cap"]:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
 
@@ -43,27 +34,6 @@ class IVScreener:
 
         # Filter by IV Rank threshold
         df = df[df["iv_rank"] >= self.iv_rank_threshold]
-
-        # Require minimum stock price (filters penny stocks)
-        price_col = "last_price" if "last_price" in df.columns else "last"
-        if price_col in df.columns:
-            before_price = len(df)
-            missing_price = int(df[price_col].isna().sum())
-            price_mask = df[price_col].isna() | (df[price_col] >= self.min_stock_price)
-            df = df[price_mask]
-            filtered_price = before_price - len(df)
-            if filtered_price > 0:
-                print(
-                    f"⚠ Filtered out {filtered_price} penny stocks (< ${self.min_stock_price})"
-                )
-            if missing_price > 0:
-                print(
-                    f"⚠ {missing_price} symbols missing stock price; price filter skipped for them"
-                )
-        else:
-            print(
-                "⚠ No stock price column found ('last_price'/'last'); price filter skipped"
-            )
 
         # Require minimum underlying share volume
         if "volume" in df.columns:
@@ -97,26 +67,9 @@ class IVScreener:
                     f"⚠ Filtered out {filtered_market_cap} small-cap names (< ${self.min_market_cap:,})"
                 )
             if missing_market_cap > 0:
-                missing_cap_df = df[df["market_cap"].isna()]
-                if "symbol" in missing_cap_df.columns:
-                    missing_cap_symbols = (
-                        missing_cap_df["symbol"].dropna().astype(str).tolist()
-                    )
-                else:
-                    missing_cap_symbols = [
-                        str(idx) for idx in missing_cap_df.index.tolist()
-                    ]
-                preview_count = min(20, len(missing_cap_symbols))
-                preview = ", ".join(missing_cap_symbols[:preview_count])
                 print(
                     f"⚠ {missing_market_cap} symbols missing market cap; market-cap filter skipped for them"
                 )
-                if preview:
-                    print(
-                        f"   Missing market-cap symbols ({preview_count}/{len(missing_cap_symbols)}): {preview}"
-                    )
-                    if len(missing_cap_symbols) > preview_count:
-                        print("   ...and more")
 
         # Filter out trading halts (if field is present)
         if "is_trading_halted" in df.columns:
