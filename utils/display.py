@@ -28,31 +28,51 @@ def display_opportunities(opportunities: List[Dict]):
         "premium",
         "max_loss",
         "risk_reward_ratio",
+        "ev_score_chosen",
+        "strategy_alignment_score",
         "dte",
         "earnings_within_dte",
+        "skew_ratio",
     ]
 
+    # Only keep columns that actually exist in the data
+    display_cols = [c for c in display_cols if c in df.columns]
     df = df[display_cols]
 
     # Rename columns for display
-    df.columns = [
-        "Symbol",
-        "Stock $",
-        "Short Strike",
-        "Long Strike",
-        "Width",
-        "Premium",
-        "Max Loss",
-        "R/R Ratio",
-        "DTE",
-        "Earnings",
-    ]
+    col_labels = {
+        "symbol": "Symbol",
+        "stock_price": "Stock $",
+        "short_strike": "Short Strike",
+        "long_strike": "Long Strike",
+        "width": "Width",
+        "premium": "Premium",
+        "max_loss": "Max Loss",
+        "risk_reward_ratio": "R/R Ratio",
+        "ev_score_chosen": "EV Score",
+        "strategy_alignment_score": "Align Score",
+        "dte": "DTE",
+        "earnings_within_dte": "Earnings",
+        "skew_ratio": "IV Skew Ratio",
+    }
+    df.columns = [col_labels[c] for c in display_cols]
 
     # Round numeric columns
     df["Stock $"] = df["Stock $"].round(2)
     df["Premium"] = df["Premium"].round(2)
     df["Max Loss"] = df["Max Loss"].round(2)
     df["R/R Ratio"] = df["R/R Ratio"].round(2)
+    if "EV Score" in df.columns:
+        df["EV Score"] = pd.to_numeric(df["EV Score"], errors="coerce").round(4)
+        df["EV Score"] = df["EV Score"].fillna("")
+    if "Align Score" in df.columns:
+        df["Align Score"] = pd.to_numeric(df["Align Score"], errors="coerce").round(1)
+        df["Align Score"] = df["Align Score"].fillna("")
+    if "IV Skew Ratio" in df.columns:
+        df["IV Skew Ratio"] = pd.to_numeric(df["IV Skew Ratio"], errors="coerce").round(
+            3
+        )
+        df["IV Skew Ratio"] = df["IV Skew Ratio"].fillna("")
     df["Earnings"] = df["Earnings"].fillna("")
 
     print(f"\n{'=' * 100}")
@@ -110,6 +130,9 @@ def display_summary(
     print(f"High IV candidates:         {high_iv_count}")
     print(f"Valid trade opportunities:  {opportunities_count}")
     print(f"Execution time:             {execution_time:.2f} seconds")
+    print(
+        f"Current time:               {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    )
     print(f"{'=' * 60}\n")
 
 

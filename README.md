@@ -7,9 +7,13 @@ An automated options screening tool that identifies high implied volatility (IV)
 - **IV Rank Screening**: Filters stocks by implied volatility rank to find elevated IV environments
 - **Watchlist Integration**: Pulls symbols from Tastytrade public watchlists (S&P 500, Liquid ETFs)
 - **Options Analysis**: Evaluates put credit spreads based on delta, days to expiration, and risk/reward ratios
+- **EV-Ranked Candidates**: Scores every evaluated spread by `ev_score = (premium / max_loss) * (1 - short_delta)` and selects the best-scoring candidate per symbol/expiration
+- **Skew Shift Search**: Automatically evaluates OTM and ITM shifts from the anchor strike using the option ladder (not dollar jumps), with a hard ATM/ITM guard
+- **Candidate Logging**: Writes every evaluated spread (selected and rejected) to `opportunities/opportunity_candidates.csv` with full entry-time context
 - **Batch Processing**: Efficient API calls with rate limiting and batch requests
 - **Smart Caching**: File-based cache to avoid redundant API calls (watchlists, expirations, chains, metrics, quotes)
 - **CSV Export**: Automatically saves trade opportunities to timestamped CSV files
+- **Analytics Suite**: Offline scripts for data quality auditing, rejection diagnostics, and analysis dataset building
 
 ## Prerequisites
 
@@ -67,7 +71,11 @@ Edit `config.py` to customize screening parameters:
 - `MAX_STRIKE_INCREMENT`: Largest strike increment to accept when adapting widths (default: 10)
 - `MAX_RISK_REWARD_RATIO`: Maximum risk/reward ratio (default: 4.0)
 
-### Display Settings
+### Skew Optimization
+- `SKEW_WINDOW_OTM`: Number of OTM (lower-strike, lower-delta) shift candidates to evaluate from anchor (default: 2)
+- `SKEW_WINDOW_ITM`: Number of ITM (higher-strike, higher-delta) shift candidates to evaluate from anchor (default: 1)
+- `MIN_SCORE_IMPROVEMENT_PCT`: Minimum EV score improvement % required to replace anchor with a shifted candidate (default: 5)
+
 ### Caching
 - `CACHE_DIR`: Directory for cached JSON files (default: cache)
 - `CACHE_TTL_SESSION`: Session token reuse window
@@ -115,6 +123,75 @@ python main.py --sync-positions
 ```
 Fetches current account positions, parses option spreads, displays P/L summary with alerts, and saves to `trades/trades_open.csv`. Use this for quick position checks without running the full screener.
 
+---
+
+## Analytics Commands
+
+All analytics scripts are run from the project root. They do not require API access and operate on locally stored CSV files.
+
+**Build the analysis dataset (join candidates with trade outcomes):**
+```bash
+python analysis/build_analysis_dataset.py
+```
+Reads `opportunities/opportunity_candidates.csv` and `trades/*.csv`, performs strict key matching, and writes `analysis/analysis_dataset.csv`.
+
+**Run the data quality audit:**
+```bash
+python analysis/data_quality_audit.py
+```
+Checks the candidate log and analysis dataset for schema drift, impossible values, and duplicate rows. Prints a summary; no files are modified.
+
+**Run rejection diagnostics (default — all dates, top 10):**
+```bash
+python analysis/rejection_diagnostics.py
+```
+
+**Rank selected opportunities from the latest run:**
+```bash
+python analysis/ranking_engine.py
+```
+Reads `opportunities/opportunity_candidates.csv`, ranks the latest run's selected opportunities, and writes `analysis/reports/opportunity_rankings_<run_id>.csv`.
+
+**Rank a specific run and write to a custom file:**
+```bash
+python analysis/ranking_engine.py --run-id 20260324_142424 --output analysis/reports/my_rankings.csv --top-n 15
+```
+
+**Rejection diagnostics with a date window:**
+```bash
+python analysis/rejection_diagnostics.py --start-date 2026-03-01 --end-date 2026-03-24
+```
+
+**Rejection diagnostics with custom top-N and output prefix:**
+```bash
+python analysis/rejection_diagnostics.py --top-n 15 --export-prefix weekly_2026_03_24
+```
+
+**All rejection diagnostics options:**
+
+| Flag | Default | Description |
+|---|---|---|
+| `--top-n N` | `10` | Number of top reasons/symbols to display |
+| `--start-date YYYY-MM-DD` | *(all)* | Inclusive start date filter |
+| `--end-date YYYY-MM-DD` | *(all)* | Inclusive end date filter |
+| `--export-dir PATH` | `analysis/reports` | Directory for CSV summary exports |
+| `--export-prefix PREFIX` | `rejection_diagnostics` | Filename prefix for exported CSVs |
+| `--symbol-log PATH` | `rejections/rejections_tracking.csv` | Override symbol-level log path |
+| `--candidate-log PATH` | `opportunities/opportunity_candidates.csv` | Override candidate log path |
+
+Two CSV files are always written to `--export-dir` after every run:
+- `{prefix}_reason_summary.csv` — detailed reason counts by source (symbol-level and candidate-level)
+- `{prefix}_bucket_summary.csv` — rollup bucket counts (delta / liquidity / pricing_economics / structure / data_quotes / selection)
+
+**Ranking engine options:**
+
+| Flag | Default | Description |
+|---|---|---|
+| `--run-id RUN_ID` | latest run | Specific candidate log run to rank |
+| `--output PATH` | `analysis/reports/opportunity_rankings_<run_id>.csv` | Output CSV path |
+| `--top-n N` | `10` | Number of ranked opportunities to print in the terminal |
+| `--candidate-log PATH` | `opportunities/opportunity_candidates.csv` | Override candidate log path |
+
 The screener will:
 1. Authenticate with Tastytrade API
 2. Fetch symbols from configured watchlists
@@ -134,9 +211,21 @@ The screener will:
 - Execution summary
 
 ### CSV Export
-When opportunities are found, results are saved to:
+When opportunities are found, screener results are saved to:
 ```
-opportunities_YYYYMMDD_HHMMSS.csv
+opportunities/opportunities_YYYYMMDD_HHMMSS.csv
+```
+
+Every evaluated spread candidate (selected and rejected) is appended to:
+```
+opportunities/opportunity_candidates.csv
+```
+
+Analytics exports are written to:
+```
+analysis/reports/{prefix}_reason_summary.csv
+analysis/reports/{prefix}_bucket_summary.csv
+analysis/reports/opportunity_rankings_<run_id>.csv
 ```
 
 ## Project Structure
@@ -149,10 +238,27 @@ highIV/
 ├── screener/
 │   ├── __init__.py
 │   ├── iv_screener.py         # IV rank filtering logic
-│   └── spread_analyzer.py     # Options spread analysis
+│   └── spread_analyzer.py     # Spread analysis, EV scoring, candidate logging
 ├── utils/
 │   ├── __init__.py
 │   └── display.py             # Console output formatting
+├── analysis/
+│   ├── build_analysis_dataset.py  # Join candidates with trade outcomes
+│   ├── data_quality_audit.py      # Schema, range, and duplicate checks
+│   ├── rejection_diagnostics.py   # Rejection rollups + CSV export
+│   ├── analysis_dataset.csv       # Output of build_analysis_dataset.py
+│   └── reports/                   # CSV exports from analytics scripts
+├── opportunities/
+│   ├── opportunity_candidates.csv # Append-only candidate log (all runs)
+│   └── opportunities_*.csv        # Per-run selected opportunities
+├── rejections/
+│   └── rejections_tracking.csv    # Symbol-level rejection counters (all runs)
+├── trades/
+│   ├── trades_open.csv            # Current open positions
+│   └── trades_closed.csv          # Closed trade history
+├── docs/
+│   ├── ARCHITECTURE.md            # System design and component docs
+│   └── data_contracts.md          # Canonical schema, units, leakage policy
 ├── config.py                  # Configuration parameters
 ├── main.py                    # Main application entry point
 ├── requirements.txt           # Python dependencies

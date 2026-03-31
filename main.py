@@ -25,6 +25,7 @@ from utils.display import (
     print_header,
     print_progress,
 )
+from analysis.ranking_engine import score_opportunities
 from utils import cache
 from utils.market_hours import is_market_open, get_market_status_display
 import config
@@ -552,17 +553,45 @@ def log_closed_trades(prev_df, current_df):
             except Exception:
                 return None
 
-        entry_credit_per_share = _safe_float(r.get("entry_credit"))
+        def _normalize_contract_value(
+            value: float | None, trade_width: float | None, field_name: str
+        ) -> float | None:
+            """Normalize dollars-per-contract values and flag suspicious records."""
+            if value is None:
+                return None
+
+            if trade_width is not None and trade_width > 0:
+                width_cap = trade_width * 100
+
+                # Auto-correct common x100 scaling mistake if corrected value is plausible.
+                if value > (width_cap * 1.5) and (value / 100) <= (width_cap * 1.5):
+                    corrected = value / 100
+                    print(
+                        f"⚠ Corrected {field_name} for {tid}: {value:.2f} -> {corrected:.2f} "
+                        "(possible x100 scaling)"
+                    )
+                    return corrected
+
+                # Flag extremely large values even if we cannot safely auto-correct.
+                if value > (width_cap * 3):
+                    print(
+                        f"⚠ Suspicious {field_name} for {tid}: {value:.2f} "
+                        f"exceeds expected cap ${width_cap:.2f}"
+                    )
+
+            return value
+
+        entry_credit_per_contract = _safe_float(r.get("entry_credit"))
         width = _safe_float(r.get("width"))
         buying_power_used = _safe_float(r.get("buying_power_used"))
-        exit_debit_per_share = _safe_float(r.get("current_mark"))
+        exit_debit_per_contract = _safe_float(r.get("current_mark"))
 
-        # Store trade economics in dollars per contract (100 shares).
-        entry_credit = (
-            entry_credit_per_share * 100 if entry_credit_per_share is not None else None
+        # Values in trades_open are already dollars per contract; do not scale again.
+        entry_credit = _normalize_contract_value(
+            entry_credit_per_contract, width, "entry_credit"
         )
-        exit_debit_est = (
-            exit_debit_per_share * 100 if exit_debit_per_share is not None else None
+        exit_debit_est = _normalize_contract_value(
+            exit_debit_per_contract, width, "close_debit"
         )
         dte_at_close = (
             int(r["dte_remaining"])
@@ -587,6 +616,12 @@ def log_closed_trades(prev_df, current_df):
             if (width is not None and entry_credit is not None)
             else None
         )
+        if max_loss is not None and max_loss < 0:
+            print(
+                f"⚠ Skipping invalid closed trade {tid}: "
+                f"computed max_loss={max_loss:.2f}"
+            )
+            continue
         profit_pct_of_max = (
             (profit_loss / max_profit * 100)
             if (profit_loss is not None and max_profit)
@@ -732,6 +767,9 @@ def main():
         return
 
     start_time = time.time()
+    run_started_at = datetime.now()
+    run_id = run_started_at.strftime("%Y%m%d_%H%M%S")
+    snapshot_ts = run_started_at.isoformat()
 
     # Load environment variables
     load_dotenv()
@@ -890,7 +928,7 @@ def main():
     print("   (This may take a few minutes)\n")
 
     # Step 3: Analyze options chains for each candidate
-    analyzer = SpreadAnalyzer()
+    analyzer = SpreadAnalyzer(run_id=run_id, snapshot_ts=snapshot_ts)
     opportunities = []
 
     print_progress("Fetching quotes for top candidates")
@@ -1060,16 +1098,20 @@ def main():
 
                 # Evaluate put spread opportunity
                 diagnostics["reached_evaluation"] += 1
+                symbol_metrics = metrics_data.get(symbol, {})
+                earnings_within_dte = get_earnings_within_dte(
+                    symbol_metrics.get("earnings_date"),
+                    data["target_exp"]["expiration_date"],
+                )
                 opportunity = analyzer.evaluate_spread(
-                    symbol, data["stock_price"], chain, data["target_exp"]
+                    symbol,
+                    data["stock_price"],
+                    chain,
+                    data["target_exp"],
+                    earnings_within_dte=earnings_within_dte,
                 )
 
                 if opportunity:
-                    symbol_metrics = metrics_data.get(symbol, {})
-                    opportunity["earnings_within_dte"] = get_earnings_within_dte(
-                        symbol_metrics.get("earnings_date"),
-                        opportunity["expiration_date"],
-                    )
                     opportunities.append(opportunity)
 
             except Exception as e:
@@ -1162,6 +1204,7 @@ def main():
         final_opportunities = analyzer.filter_opportunities(opportunities)
 
         # Display results
+        final_opportunities = score_opportunities(final_opportunities)
         display_opportunities(final_opportunities)
 
         # Auto-save to CSV if enabled
@@ -1179,6 +1222,10 @@ def main():
                 "dte",
                 "expiration_date",
                 "earnings_within_dte",
+                "skew_ratio",
+                "skew_diff",
+                "short_iv",
+                "atm_iv",
             ]
             for col in preferred_order:
                 if col not in df.columns:

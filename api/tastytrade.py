@@ -820,6 +820,9 @@ class TastytradeAPI:
                     "ask": float(opt.get("ask")) if opt.get("ask") else None,
                     "last": float(opt.get("last")) if opt.get("last") else None,
                     "delta": float(opt.get("delta")) if opt.get("delta") else None,
+                    "implied_volatility": float(opt.get("volatility"))
+                    if opt.get("volatility")
+                    else None,
                     "theta": float(opt.get("theta")) if opt.get("theta") else None,
                     "gamma": float(opt.get("gamma")) if opt.get("gamma") else None,
                     "vega": float(opt.get("vega")) if opt.get("vega") else None,
@@ -934,7 +937,17 @@ class TastytradeAPI:
                     "long_legs": [],
                 }
 
-            # Store leg data
+            # Read quantity and store one leg entry per contract so that
+            # multi-contract positions (e.g. 2x ASTS 75/70) produce the correct
+            # number of spread pairs instead of collapsing to one.
+            # NOTE: trades opened and closed between consecutive syncs will never
+            # appear here; they are an inherent limitation of position-diff tracking.
+            try:
+                quantity = int(float(pos.get("quantity") or 1))
+            except (TypeError, ValueError):
+                quantity = 1
+            quantity = max(quantity, 1)
+
             leg_data = {
                 "strike": strike,
                 "option_symbol": option_symbol,
@@ -944,9 +957,11 @@ class TastytradeAPI:
             }
 
             if quantity_direction == "Short":
-                spreads_map[spread_key]["short_legs"].append(leg_data)
+                for _ in range(quantity):
+                    spreads_map[spread_key]["short_legs"].append(dict(leg_data))
             elif quantity_direction == "Long":
-                spreads_map[spread_key]["long_legs"].append(leg_data)
+                for _ in range(quantity):
+                    spreads_map[spread_key]["long_legs"].append(dict(leg_data))
 
         # Build spread records
         spreads = []
