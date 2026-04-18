@@ -3,7 +3,7 @@ IV Screening logic - filters stocks by IV Rank and other criteria
 """
 
 import pandas as pd
-from typing import List, Dict
+
 import config
 
 
@@ -13,7 +13,7 @@ class IVScreener:
         self.min_underlying_volume = config.MIN_UNDERLYING_VOLUME
         self.min_market_cap = config.MIN_MARKET_CAP
 
-    def filter_by_iv_rank(self, metrics_data: Dict) -> pd.DataFrame:
+    def filter_by_iv_rank(self, metrics_data: dict) -> pd.DataFrame:
         """
         Filter stocks by IV Rank threshold and trading status
         Returns DataFrame sorted by IV Rank descending
@@ -96,7 +96,7 @@ class IVScreener:
 
     def get_top_candidates(
         self, df: pd.DataFrame, max_results: int = config.MAX_SCREENING_RESULTS
-    ) -> List[str]:
+    ) -> list[str]:
         """
         Get top N candidates from filtered DataFrame
         Returns list of symbols

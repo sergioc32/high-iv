@@ -306,27 +306,39 @@ MAX_LONG_LEG_BID_ASK_WIDTH_PCT = 0.06
 
 ---
 
-### Priority 3: Conservative Credit Check
+### Priority 3: Credit Fillability Model
 
-**Objective**: Filter "looks good on midpoint but can't fill" spreads
+**Objective**: Filter "looks good on midpoint but can't fill" spreads without discarding usable but slightly messy markets
 
-**Current**: Uses `mid(short) - mid(long)` for premium calculations
+**Implemented**: Uses a two-stage credit model
 
-**Proposed**: Add fillability estimate
 ```python
 credit_mid = mid(short) - mid(long)
-credit_conservative = bid(short) - ask(long)  # Worst-case fill
+credit_natural = bid(short) - ask(long)  # Worst-case fill
+credit_expected = bounded_weighted_fill(credit_natural, credit_mid, avg_width_pct)
 
-# Require minimum conservative credit
-if credit_conservative <= 0 or credit_conservative < MIN_CONSERVATIVE_CREDIT:
-    reject spread  # Mid looks good but unfillable
+# Gate A: execution sanity
+if credit_natural < -(width * MIN_NATURAL_CREDIT_PCT):
+  reject spread
+
+# Gate B: economics
+if credit_expected < width * MIN_CREDIT_PER_WIDTH:
+  reject spread
 ```
 
-**Config Addition**:
+**Config Inputs**:
 ```python
-MIN_CONSERVATIVE_CREDIT = 0.05  # At least $5 on worst fill
+MIN_NATURAL_CREDIT_PCT = 0.05
+MIN_CREDIT_PER_WIDTH = 0.08
+CREDIT_DYNAMIC_WIDTH_PCT_TIGHT = 0.10
+CREDIT_DYNAMIC_WIDTH_PCT_OK = 0.20
+CREDIT_DYNAMIC_WIDTH_PCT_WIDE = 0.35
+CREDIT_DYNAMIC_MID_WEIGHT_TIGHT = 0.85
+CREDIT_DYNAMIC_MID_WEIGHT_OK = 0.75
+CREDIT_DYNAMIC_MID_WEIGHT_MODERATE = 0.65
+CREDIT_DYNAMIC_MID_WEIGHT_VERY_WIDE = 0.55
 ```
 
-**Benefit**: Eliminates "fill surprise" trades before entry
+**Benefit**: Separates fillability from economics and preserves a single modeled premium for ranking, metrics, and diagnostics
 
-**Status**: Pending — implement after Phase 3A analysis data accumulation
+**Status**: Implemented

@@ -1,9 +1,9 @@
-import os
-import json
-import time
 import hashlib
-from typing import Any, Optional
+import json
+import os
+import time
 from datetime import datetime
+from typing import Any
 
 DEFAULT_CACHE_DIR = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "..", "cache"
@@ -20,8 +20,8 @@ def _key_to_path(cache_dir: str, key: str) -> str:
 
 
 def get(
-    key: str, ttl_seconds: int, cache_dir: Optional[str] = None, same_day: bool = False
-) -> Optional[Any]:
+    key: str, ttl_seconds: int, cache_dir: str | None = None, same_day: bool = False
+) -> Any | None:
     """Retrieve cached data if not expired. Returns None when missing/expired.
     When same_day=True, cached entries from a previous calendar day are treated as expired
     regardless of TTL. Useful for data that changes day-over-day (e.g., DTE).
@@ -35,7 +35,7 @@ def get(
         return None
 
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             payload = json.load(f)
         ts = payload.get("timestamp")
         if ts is None:
@@ -53,7 +53,7 @@ def get(
         return None
 
 
-def set(key: str, data: Any, cache_dir: Optional[str] = None) -> None:
+def set(key: str, data: Any, cache_dir: str | None = None) -> None:
     """Persist data in cache with current timestamp."""
     if cache_dir is None:
         cache_dir = DEFAULT_CACHE_DIR
@@ -68,7 +68,7 @@ def set(key: str, data: Any, cache_dir: Optional[str] = None) -> None:
         pass
 
 
-def clear_all(cache_dir: Optional[str] = None) -> int:
+def clear_all(cache_dir: str | None = None) -> int:
     """Clear all cache files. Returns count of files deleted."""
     if cache_dir is None:
         cache_dir = DEFAULT_CACHE_DIR
@@ -89,7 +89,7 @@ def clear_all(cache_dir: Optional[str] = None) -> int:
     return count
 
 
-def clear_stale_daily(cache_dir: Optional[str] = None) -> int:
+def clear_stale_daily(cache_dir: str | None = None) -> int:
     """Clear cache entries from previous calendar days. Returns count of files deleted."""
     if cache_dir is None:
         cache_dir = DEFAULT_CACHE_DIR
@@ -105,7 +105,7 @@ def clear_stale_daily(cache_dir: Optional[str] = None) -> int:
             filepath = os.path.join(cache_dir, filename)
             if os.path.isfile(filepath) and filename.endswith(".json"):
                 try:
-                    with open(filepath, "r", encoding="utf-8") as f:
+                    with open(filepath, encoding="utf-8") as f:
                         payload = json.load(f)
                     ts = payload.get("timestamp")
                     if ts:

@@ -11,3 +11,5 @@ trades/trades_open.csv
 snapshots/
 rejections/
 analysis/reports/
+analysis/analysis_dataset.csv
+opportunities/opportunity_candidates.csv

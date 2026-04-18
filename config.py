@@ -22,7 +22,7 @@ MAX_DELTA = 0.21  # Maximum acceptable delta for short put
 LONG_PUT_DELTA = 0.10  # Delta for long put (protection)
 
 # Skew optimization
-SKEW_WINDOW_OTM = 2  # Check N OTM (lower-delta/lower-strike) shifts from anchor
+SKEW_WINDOW_OTM = 3  # Check N OTM (lower-delta/lower-strike) shifts from anchor
 SKEW_WINDOW_ITM = 1  # Check N ITM (higher-delta/higher-strike) shifts from anchor
 MIN_SCORE_IMPROVEMENT_PCT = 5  # Require 5% higher skew score to switch from anchor
 
@@ -30,6 +30,17 @@ MIN_SCORE_IMPROVEMENT_PCT = 5  # Require 5% higher skew score to switch from anc
 MIN_CREDIT_PER_WIDTH = (
     0.08  # $8 per $1 width (3-wide=$24, 5-wide=$40) whitelist=0.08, general=0.12-0.15
 )
+MIN_NATURAL_CREDIT_PCT = 0.05  # Allow up to -5% of max_loss as natural floor; scales with width (e.g., 3-wide:-$15, 5-wide:-$25)
+# Dynamic credit weighting: bid/ask quality tiers (avg_width_pct breakpoints and mid-weight per tier)
+CREDIT_DYNAMIC_WIDTH_PCT_TIGHT = 0.10  # avg_width_pct < this → tight market
+CREDIT_DYNAMIC_WIDTH_PCT_OK = 0.20  # avg_width_pct < this → ok market
+CREDIT_DYNAMIC_WIDTH_PCT_WIDE = (
+    0.35  # avg_width_pct < this → wide market (else → very wide)
+)
+CREDIT_DYNAMIC_MID_WEIGHT_TIGHT = 0.85  # mid weight when market is tight
+CREDIT_DYNAMIC_MID_WEIGHT_OK = 0.75  # mid weight when market is ok
+CREDIT_DYNAMIC_MID_WEIGHT_MODERATE = 0.65  # mid weight when market is wide
+CREDIT_DYNAMIC_MID_WEIGHT_VERY_WIDE = 0.55  # mid weight when market is very wide
 # Asymmetric bid/ask thresholds - short leg stricter, long leg looser
 MAX_SHORT_LEG_BID_ASK_WIDTH = (
     1.25  # Max absolute spread on short leg whitelist=1.50 max, general=1.25 max
@@ -51,7 +62,7 @@ EQUITY_QUOTE_BATCH_SIZE = 200  # Max equity symbols per quote batch call
 PREFERRED_SPREAD_WIDTH = 3  # Preferred spread width in dollars
 FALLBACK_SPREAD_WIDTH = 5  # Fallback if $3 strikes not available
 MAX_STRIKE_INCREMENT = 10  # Max strike increment to accept when adapting widths
-MAX_RISK_REWARD_RATIO = 4.5  # Max loss / Premium received (prefer 4.0 or lower)
+MAX_RISK_REWARD_RATIO = 4.25  # Max loss / Premium received (prefer 4.0 or lower)
 
 # Exit strategy (for reference/future tracking)
 TARGET_EXIT_DTE = 21  # Target days to exit
@@ -63,14 +74,22 @@ EXIT_STRUCTURAL_MULTIPLE = (
     1.5  # Alert if short strike breached and debit >= multiple * credit
 )
 EXIT_GAMMA_RISK_DTE = 30  # Alert if short strike breached and DTE <= this
+ORDER_HISTORY_LOOKBACK_DAYS = 14  # Recent order window for closed-trade reconciliation
+ORDER_HISTORY_MAX_PAGES = 2  # Default page cap for lightweight recent order retrieval
 
 # Display settings
-MAX_SCREENING_RESULTS = 100  # Max stocks to show after IV screening
+MAX_SCREENING_RESULTS = 250  # Max stocks to show after IV screening
 MAX_FINAL_RESULTS = 25  # Max trade opportunities to display
 AUTO_SAVE_CSV = True  # Automatically save results to CSV file
 
 # DTE tolerance for finding expirations
 DTE_TOLERANCE = 14  # Will accept expirations within +/- 14 days of target
+
+# Strategy version labeling for analysis/backtesting continuity.
+# Bump STRATEGY_VERSION whenever entry logic meaningfully changes.
+STRATEGY_VERSION = "v2_dynamic"
+LEGACY_STRATEGY_VERSION = "v1_conservative"
+STRATEGY_VERSION_CUTOFF_DATE = "2026-04-09"
 
 # Manual exclusions (useful for temporarily skipping symbols under restrictions)
 EXCLUDE_SYMBOLS = []

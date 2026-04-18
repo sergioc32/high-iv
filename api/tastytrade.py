@@ -2,17 +2,18 @@
 Tastytrade API wrapper for options screening
 """
 
-import requests
-import os
 import base64
 import json
-from typing import List, Dict, Optional, Any
+import os
 import time
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
+from typing import Any
 from urllib.parse import quote
-from utils import cache
-import config
 
+import requests
+
+import config
+from utils import cache
 
 # Fallback S&P 500 symbols (top liquid names) if watchlist fails
 SP500_FALLBACK = [
@@ -129,7 +130,7 @@ class TastytradeAPI:
         self.debug = False  # Set to True to see raw API responses
         self.session.headers.update(self._build_default_headers())
 
-    def _build_default_headers(self) -> Dict[str, str]:
+    def _build_default_headers(self) -> dict[str, str]:
         accept_version = os.getenv(
             "TASTYTRADE_ACCEPT_VERSION"
         ) or datetime.now().strftime("%Y%m%d")
@@ -141,7 +142,7 @@ class TastytradeAPI:
         }
 
     @staticmethod
-    def _decode_jwt_payload(token: str) -> Optional[Dict[str, Any]]:
+    def _decode_jwt_payload(token: str) -> dict[str, Any] | None:
         parts = token.split(".")
         if len(parts) != 3:
             return None
@@ -282,12 +283,12 @@ class TastytradeAPI:
 
     def list_watchlists(
         self, include_public: bool = True, include_private: bool = True
-    ) -> List[Dict]:
+    ) -> list[dict]:
         """
         List available watchlists. Public watchlists are platform-provided; private are user-created.
         Returns list of watchlist info with names and IDs.
         """
-        watchlists: List[Dict] = []
+        watchlists: list[dict] = []
         endpoints = []
         if include_private:
             endpoints.append("watchlists")
@@ -324,7 +325,7 @@ class TastytradeAPI:
 
         return watchlists
 
-    def get_watchlist(self, watchlist_name: str, public: bool = False) -> List[str]:
+    def get_watchlist(self, watchlist_name: str, public: bool = False) -> list[str]:
         """
         Get symbols from a watchlist by name or ID.
         - Set public=True to force the public-watchlists endpoint.
@@ -386,7 +387,7 @@ class TastytradeAPI:
             print(json.dumps(data, indent=2))
             print(f"{'=' * 80}\n")
 
-    def get_market_metrics(self, symbols: List[str]) -> Dict:
+    def get_market_metrics(self, symbols: list[str]) -> dict:
         """
         Get market metrics (IV Rank, IV Percentile, etc.) for a list of symbols
         Returns dictionary with symbol as key and metrics as value
@@ -453,7 +454,7 @@ class TastytradeAPI:
             print(f"✗ Failed to get market metrics: {e}")
             return {}
 
-    def get_quote(self, symbol: str) -> Optional[Dict]:
+    def get_quote(self, symbol: str) -> dict | None:
         """
         Get current quote for a symbol using market-data endpoint
         """
@@ -484,7 +485,7 @@ class TastytradeAPI:
             print(f"✗ Failed to get quote for {symbol}: {e}")
             return None
 
-    def get_quotes_batch(self, symbols: List[str]) -> Dict[str, Optional[Dict]]:
+    def get_quotes_batch(self, symbols: list[str]) -> dict[str, dict | None]:
         """
         Get quotes for multiple symbols in a single batch call
         Returns dictionary with symbol as key and quote data as value
@@ -538,7 +539,7 @@ class TastytradeAPI:
             print(f"✗ Failed to get batch quotes: {e}")
             return {}
 
-    def _parse_equity_quote_item(self, requested_symbol: str, quote_item: Dict) -> Dict:
+    def _parse_equity_quote_item(self, requested_symbol: str, quote_item: dict) -> dict:
         """Parse one equity quote item into the canonical quote record format."""
         market_cap_raw = (
             quote_item.get("market-cap")
@@ -560,7 +561,7 @@ class TastytradeAPI:
             "is_trading_halted": quote_item.get("is-trading-halted", False),
         }
 
-    def _fetch_equity_quotes_resilient(self, symbols: List[str]) -> Dict[str, Dict]:
+    def _fetch_equity_quotes_resilient(self, symbols: list[str]) -> dict[str, dict]:
         """
         Fetch equity quotes for a symbol list.
         If a batch fails with HTTP 400, recursively split to isolate problematic symbols.
@@ -581,7 +582,7 @@ class TastytradeAPI:
             requested_map = {sym.upper(): sym for sym in symbols}
             normalized_map = {sym.replace("/", ".").upper(): sym for sym in symbols}
 
-            parsed_quotes: Dict[str, Dict] = {}
+            parsed_quotes: dict[str, dict] = {}
             for item in items:
                 response_symbol = str(item.get("symbol") or "")
                 key_upper = response_symbol.upper()
@@ -615,7 +616,7 @@ class TastytradeAPI:
                 )
             return {}
 
-    def get_option_expirations(self, symbol: str) -> List[Dict]:
+    def get_option_expirations(self, symbol: str) -> list[dict]:
         """
         Get available option expiration dates for a symbol
         Returns list of expiration info with DTE
@@ -669,7 +670,7 @@ class TastytradeAPI:
             print(f"✗ Error parsing expirations for {symbol}: {e}")
             return []
 
-    def get_option_chain(self, symbol: str, expiration_date: str) -> Dict:
+    def get_option_chain(self, symbol: str, expiration_date: str) -> dict:
         """
         Get option chain strikes for a specific symbol and expiration.
         Note: This returns option symbols only. To get quotes/greeks, use get_option_quotes.
@@ -751,8 +752,8 @@ class TastytradeAPI:
             return {}
 
     def get_option_quotes(
-        self, option_symbols: List[str], batch_size: int = 50
-    ) -> Dict[str, Dict]:
+        self, option_symbols: list[str], batch_size: int = 50
+    ) -> dict[str, dict]:
         """
         Get quotes for option symbols including bid/ask/greeks
         Uses batching to avoid URL length limits for symbols with many strikes
@@ -797,7 +798,7 @@ class TastytradeAPI:
 
         return all_quotes
 
-    def _fetch_option_quotes_batch(self, option_symbols: List[str]) -> Dict[str, Dict]:
+    def _fetch_option_quotes_batch(self, option_symbols: list[str]) -> dict[str, dict]:
         """
         Internal method to fetch a single batch of option quotes
         """
@@ -843,7 +844,7 @@ class TastytradeAPI:
             return {}
 
     def batch_request_with_delay(
-        self, symbols: List[str], batch_size: int = 100, delay: float = 0.5
+        self, symbols: list[str], batch_size: int = 100, delay: float = 0.5
     ):
         """
         Helper method to batch large requests with delays to respect rate limits
@@ -861,7 +862,7 @@ class TastytradeAPI:
 
         return results
 
-    def get_account_positions(self, account_number: Optional[str] = None) -> List[Dict]:
+    def get_account_positions(self, account_number: str | None = None) -> list[dict]:
         """
         Get all current positions from account
         Returns list of position dictionaries
@@ -886,14 +887,141 @@ class TastytradeAPI:
             print(f"✗ Failed to get account positions: {e}")
             return []
 
-    def parse_option_spreads(self, positions: List[Dict]) -> List[Dict]:
+    @staticmethod
+    def _parse_api_timestamp(value: Any) -> datetime | None:
+        if value is None:
+            return None
+
+        if isinstance(value, (int, float)):
+            try:
+                return datetime.fromtimestamp(float(value) / 1000, tz=UTC).replace(
+                    tzinfo=None
+                )
+            except (OverflowError, OSError, ValueError):
+                return None
+
+        if not isinstance(value, str):
+            return None
+
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            if parsed.tzinfo is not None:
+                return parsed.astimezone(UTC).replace(tzinfo=None)
+            return parsed
+        except ValueError:
+            return None
+
+    def get_account_orders(
+        self,
+        account_number: str | None = None,
+        lookback_days: int | None = None,
+        statuses: list[str] | None = None,
+        max_pages: int | None = config.ORDER_HISTORY_MAX_PAGES,
+        stop_when_older_than_cutoff: bool = True,
+    ) -> list[dict]:
+        """
+        Get recent account orders and filter them locally by lookback window/status.
+
+        This method paginates through account orders with a conservative default
+        page cap for normal sync usage. Callers such as one-off backfill tools can
+        override the page cap to walk deeper into order history.
+        """
+        if account_number is None:
+            account_number = config.TASTYTRADE_ACCOUNT_NUMBER
+        if lookback_days is None:
+            lookback_days = config.ORDER_HISTORY_LOOKBACK_DAYS
+
+        normalized_statuses = (
+            {status.strip().lower() for status in statuses if status and status.strip()}
+            if statuses
+            else {"filled"}
+        )
+        cutoff = datetime.now() - timedelta(days=max(int(lookback_days), 0))
+
+        try:
+            url = f"{self.BASE_URL}/accounts/{account_number}/orders"
+            filtered_orders: list[dict] = []
+            page_offset = 0
+            pages_fetched = 0
+
+            while True:
+                params = {"page-offset": page_offset}
+                response = self.session.get(url, params=params)
+                response.raise_for_status()
+
+                data = response.json()
+                items = data.get("data", {}).get("items", [])
+                pagination = data.get("pagination", {})
+                total_pages = int(pagination.get("total-pages") or 0)
+                oldest_order_time_on_page: datetime | None = None
+
+                for order in items:
+                    candidate_times = [
+                        self._parse_api_timestamp(order.get("terminal-at")),
+                        self._parse_api_timestamp(order.get("received-at")),
+                        self._parse_api_timestamp(order.get("updated-at")),
+                    ]
+                    order_time = next(
+                        (value for value in candidate_times if value is not None),
+                        None,
+                    )
+                    if order_time is not None and (
+                        oldest_order_time_on_page is None
+                        or order_time < oldest_order_time_on_page
+                    ):
+                        oldest_order_time_on_page = order_time
+
+                    status = str(order.get("status") or "").strip().lower()
+                    if normalized_statuses and status not in normalized_statuses:
+                        continue
+                    if order_time is not None and order_time < cutoff:
+                        continue
+
+                    filtered_orders.append(order)
+
+                pages_fetched += 1
+                if not items:
+                    break
+                if max_pages is not None and pages_fetched >= max_pages:
+                    break
+                if total_pages and page_offset >= (total_pages - 1):
+                    break
+                if (
+                    stop_when_older_than_cutoff
+                    and oldest_order_time_on_page is not None
+                    and oldest_order_time_on_page < cutoff
+                ):
+                    break
+
+                page_offset += 1
+
+            filtered_orders.sort(
+                key=lambda order: (
+                    self._parse_api_timestamp(order.get("terminal-at"))
+                    or self._parse_api_timestamp(order.get("received-at"))
+                    or self._parse_api_timestamp(order.get("updated-at"))
+                    or datetime.min
+                ),
+                reverse=True,
+            )
+
+            print(
+                f"✓ Retrieved {len(filtered_orders)} recent order(s) from account {account_number} across {pages_fetched} page(s)"
+            )
+            return filtered_orders
+
+        except requests.exceptions.RequestException as e:
+            print(f"✗ Failed to get account orders: {e}")
+            return []
+
+    def parse_option_spreads(self, positions: list[dict]) -> list[dict]:
         """
         Parse individual option positions into spread pairs
         Groups short + long puts by underlying symbol and expiration
         Returns list of spread dictionaries with entry/current data
         """
-        from datetime import datetime, date
         import re
+        from datetime import date, datetime
 
         # Filter to only option positions
         option_positions = [
@@ -967,7 +1095,7 @@ class TastytradeAPI:
         spreads = []
         today = date.today()
 
-        for spread_key, spread_data in spreads_map.items():
+        for _, spread_data in spreads_map.items():
             short_legs = spread_data.get("short_legs", [])
             long_legs = spread_data.get("long_legs", [])
 

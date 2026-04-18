@@ -13,9 +13,9 @@ from __future__ import annotations
 import argparse
 import csv
 from collections import Counter, defaultdict
+from collections.abc import Iterable
 from datetime import date
 from pathlib import Path
-from typing import Iterable
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_SYMBOL_REJECTIONS_PATH = PROJECT_ROOT / "rejections" / "rejections_tracking.csv"
@@ -29,7 +29,8 @@ REASON_BUCKETS: dict[str, str] = {
     "short_bid_ask_width": "liquidity",
     "long_bid_ask_width": "liquidity",
     "open_interest": "liquidity",
-    "credit_conservative": "pricing_economics",
+    "credit_natural_too_low": "pricing_economics",
+    "credit_expected_too_low": "pricing_economics",
     "premium_zero_or_negative": "pricing_economics",
     "risk_reward": "pricing_economics",
     "no_long_strike": "structure",
@@ -61,7 +62,7 @@ def as_int(value: str) -> int:
 
 def is_rejection_counter_column(column_name: str) -> bool:
     """Return True for symbol-level rejection counter fields."""
-    excluded = {"timestamp", "symbol", "total_rejections"}
+    excluded = {"timestamp", "symbol", "strategy_version", "total_rejections"}
     return column_name not in excluded
 
 

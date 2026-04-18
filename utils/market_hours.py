@@ -3,6 +3,7 @@ Market hours detection utility
 """
 
 from datetime import datetime
+
 import pytz
 
 

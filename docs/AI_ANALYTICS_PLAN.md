@@ -22,10 +22,13 @@ Primary data sources:
 ### Goal
 Deliver actionable weekly insights and opportunity rankings using robust, transparent analytics.
 
+### Status
+Phase 1 is complete as of 2026-04-05. Remaining optional schema enhancements are deferred to Phase 2.
+
 ### Phase 1 Design Decisions
 - Keep `rejections/rejections_tracking.csv` as the symbol-level rejection log.
 - Add `opportunities/opportunity_candidates.csv` as the new candidate-level entry-time dataset.
-- Keep trade-to-opportunity matching mechanical and strict.
+- Keep trade-to-opportunity matching deterministic, with controlled adjusted-execution fallback for real fills.
 - Use only entry-time fields for analytics features and future model inputs.
 - Leave source-quality tiers out for now; the workflow assumes trades are taken from script-generated opportunities.
 
@@ -37,10 +40,23 @@ Deliver actionable weekly insights and opportunity rankings using robust, transp
 - `rejection_reason_primary` and `rejection_reason_flags` are currently expected to be identical in most rows.
 : In Phase 1 we reject on first failing gate and log immediately, so there is usually one reason only.
 : `rejection_reason_flags` is intentionally retained for future multi-reason logging without schema churn.
+- Candidate pricing now uses a bounded expected-credit model (Phase 1 refinement):
+  - `credit_natural = short_bid - long_ask` (x100) = worst-case execution price.
+  - `credit_mid = (short_mid - long_mid) * 100` = mid-market expectation.
+  - `credit_expected = max(credit_natural, min(weighted, credit_mid))` where `weighted = 0.75 * credit_mid + 0.25 * credit_natural`.
+  - Clamping ensures we never go below natural (respects execution risk) and never exceed mid (prevents over-optimism).
+  - All economics (premium, max_loss, risk_reward_ratio, EV/ranking inputs) use `credit_expected`.
+- Two-gate filtering strategy (Phase 1a refinement):
+  - **Gate A (execution sanity)**: Natural credit floor scales by width: `credit_natural > -(width * 100 * MIN_NATURAL_CREDIT_PCT)` (e.g., 5% of max loss). Allows illiquid markets but rejects obviously broken bid/ask pairs.
+  - **Gate B (economics)**: Expected credit per-width: `credit_expected >= width * MIN_CREDIT_PER_WIDTH * 100`. Ensures spread pays enough return relative to its width.
+  - Rejection reasons: `credit_natural_too_low` (Gate A) and `credit_expected_too_low` (Gate B).
+  - Gate A acts as a safety valve; most candidates pass it. Gate B is the real filter, rejecting spreads that don't meet return threshold.
 - `ev_score = (premium / max_loss) * (1 - short_delta)` is computed for every candidate and stored in `opportunity_candidates.csv` and `analysis/analysis_dataset.csv`.
 - Valid-but-non-selected candidates are logged with `rejection_reason_primary = selected_ranked_out`.
-- New rejection reasons added: `itm_or_atm`, `long_strike_unavailable`, `short_leg_missing_quote`, `long_leg_missing_quote`.
+- New rejection reasons added: `itm_or_atm`, `long_strike_unavailable`, `short_leg_missing_quote`, `long_leg_missing_quote`, `credit_natural_too_low`, `credit_expected_too_low`.
 - `opportunity_candidates.csv` header auto-migrates if a new column is added; old files continue to load cleanly.
+- Analysis reconciliation now supports `exact_match`, `adjusted_match`, `missing_match`, and `trade_only`.
+- Weekly reporting includes execution-alignment diagnostics (exact vs shifted vs trade-only), shift direction (OTM/ITM), and daily opportunities-list presence metrics.
 
 ### Spread Shift Decision Spec (Implemented)
 Goal: Align spread search with manual workflow by locking one spread width at the anchor and shifting by index along the option ladder.
@@ -88,11 +104,11 @@ Goal: Align spread search with manual workflow by locking one spread width at th
   - [x] Schema drift checks across opportunity files.
   - [x] Schema drift checks across `opportunity_candidates.csv` versions.
   - [x] Missing/NaN validation and impossible value detection.
-- [ ] Add run-level metadata to screener output:
+- [x] Add run-level metadata to screener output:
   - [x] Generate `run_id` in the screener entry point.
   - [x] Generate `snapshot_ts` for every run.
   - [x] Pass `run_id` and `snapshot_ts` into spread analysis and logging.
-- [ ] Add candidate-level logging to `opportunities/opportunity_candidates.csv`:
+- [x] Add candidate-level logging to `opportunities/opportunity_candidates.csv`:
   - [x] Log one row per evaluated spread candidate.
   - [x] Log selected candidates.
   - [x] Log rejected candidates.
@@ -101,56 +117,57 @@ Goal: Align spread search with manual workflow by locking one spread width at th
   - [x] Log missing-data cases: `long_strike_unavailable`, `short_leg_missing_quote`, `long_leg_missing_quote`.
   - [x] Log ATM/ITM guard rejections with reason `itm_or_atm`.
 - [x] Keep `rejections/rejections_tracking.csv` as the symbol/run-level diagnostic log.
-- [ ] Define `opportunity_candidates.csv` Version 1 schema:
+- [x] Define `opportunity_candidates.csv` Version 1 schema:
   - [x] Identity fields: `run_id`, `snapshot_ts`, `symbol`, `expiration_date`, `short_strike`, `long_strike`, `width`.
   - [x] Market context fields: `stock_price`, `dte`, `earnings_within_dte`.
   - [x] Core spread fields: `premium`, `premium_per_width`, `max_profit`, `max_loss`, `risk_reward_ratio`.
   - [x] Core option fields: `short_delta`, `short_iv`, `atm_iv`, `skew_ratio`, `skew_diff`.
   - [x] EV ranking field: `ev_score`.
   - [x] Selection fields: `candidate_status`, `selected`, `rejection_reason_primary`, `rejection_reason_flags`.
-- [ ] Define `opportunity_candidates.csv` Version 2 schema extension:
-  - [ ] Add full leg quote fields (`short_bid`, `short_ask`, `long_bid`, `long_ask`, mids).
-  - [ ] Add option identifiers (`short_option_symbol`, `long_option_symbol`).
-  - [ ] Add OI and option volume fields.
-  - [ ] Add bid/ask width percentage fields.
+- [x] Define `opportunity_candidates.csv` Version 2 schema extension (deferred to Phase 2).
+  - [x] Add full leg quote fields (`short_bid`, `short_ask`, `long_bid`, `long_ask`, mids) in Phase 2.
+  - [x] Add option identifiers (`short_option_symbol`, `long_option_symbol`) in Phase 2.
+  - [x] Add OI and option volume fields in Phase 2.
+  - [x] Add bid/ask width percentage fields in Phase 2.
 - [x] Build normalized analysis dataset (single table/view for reporting).
-- [x] Implement strict opportunity-to-outcome matching logic:
+- [x] Implement opportunity-to-outcome matching logic:
   - [x] Match on `symbol`, `expiration_date`, `short_strike`, `long_strike`.
   - [x] Prefer same-day opportunity rows.
   - [x] Allow at most a narrow date tolerance if operationally necessary.
-  - [x] Use `match_status` values: `exact_match`, `missing_match`.
-  - [x] Do not add fuzzy or adjusted-execution matching in Phase 1.
-- [ ] Build core performance reporting:
-  - [ ] Win rate, average PnL, median PnL, max drawdown proxy.
-  - [ ] Return segmented by symbol, DTE, width, delta bucket, credit/width, skew bucket.
-  - [ ] Rolling weekly/monthly trend metrics.
+  - [x] Use `match_status` values: `exact_match`, `adjusted_match`, `missing_match`, `trade_only`.
+  - [x] Add controlled adjusted-execution matching (same symbol/expiration/width, nearest strikes).
+- [x] Build core performance reporting:
+  - [x] Win rate, average PnL, median PnL, max drawdown proxy.
+  - [x] Return segmented by symbol, DTE, width, delta bucket, credit/width, skew bucket.
+  - [x] Rolling 7-day, 14-day, and 30-day trend metrics for performance and rejections.
 - [x] Build rejection diagnostics from rejection logs:
   - [x] Top rejection reasons by frequency.
-  - [ ] Time trends for each rejection reason.
-  - [ ] Sensitivity analysis: what would pass if thresholds were loosened.
+  - [x] Time trends for each rejection reason.
+  - [x] Sensitivity analysis: what would pass if thresholds were loosened.
   - [x] Add candidate-level rejection review using `opportunity_candidates.csv`.
   - [x] Distinguish symbol-level rejection counts from candidate-level rejection details.
   - [x] Group rejection reasons into rollup buckets (delta / liquidity / pricing_economics / structure / data_quotes / selection).
   - [x] Export reason-level and bucket-level CSV summaries for weekly report ingestion.
   - [x] Add date-window filtering to scope diagnostics to a reporting period.
-- [ ] Implement explainable ranking score (v1):
+- [x] Implement explainable ranking score (v1):
   - [x] Weighted components (liquidity, credit efficiency, delta fit, skew quality, risk/reward quality).
   - [x] Output total score plus component-level explanations.
   - [x] Rank opportunities top-to-bottom with confidence bands.
-- [ ] Backtest ranking quality:
-  - [ ] Compare top-N vs middle/bottom cohorts on realized outcomes.
-  - [ ] Validate score calibration by percentile buckets.
-- [ ] Generate weekly report artifact with:
-  - [ ] Recommended parameter changes.
-  - [ ] Expected impact and confidence.
-  - [ ] Human approval step required before applying changes.
+- [x] Backtest ranking quality:
+  - [x] Compare top-N vs middle/bottom cohorts on realized outcomes.
+  - [x] Validate score calibration by percentile buckets.
+- [x] Generate weekly report artifact with:
+  - [x] Recommended parameter changes.
+  - [x] Expected impact and confidence.
+  - [x] Human approval step required before applying changes.
 
 ### Phase 1 Deliverables
 - [x] `analysis/data_quality_audit.py`
 - [x] `analysis/build_analysis_dataset.py`
 - [x] `analysis/ranking_engine.py`
 - [x] `analysis/rejection_diagnostics.py`
-- [ ] `analysis/weekly_report.py`
+- [x] `analysis/weekly_report.py`
+- [x] `analysis/run_weekly_pipeline.py`
 - [x] `opportunities/opportunity_candidates.csv`
 - [x] `docs/data_contracts.md`
 - [x] `analysis/reports/` outputs (CSV summaries from rejection diagnostics)
@@ -169,8 +186,9 @@ Goal: Align spread search with manual workflow by locking one spread width at th
 - [x] Implement `analysis/rejection_diagnostics.py` with rollup buckets, date filtering, and CSV exports.
 - [x] Implement `analysis/ranking_engine.py` with deterministic component scoring and rank export.
 - [x] Document canonical schema in `docs/data_contracts.md`.
-- [ ] Implement `analysis/weekly_report.py`.
-- [ ] Add strict trade reconciliation after enough candidate history exists.
+- [x] Implement `analysis/weekly_report.py` with performance segmentation, rejection trends, and human-review recommendations.
+- [x] Implement `analysis/run_weekly_pipeline.py` to orchestrate rejection diagnostics and weekly report in one command.
+- [x] Add enhanced trade reconciliation (exact + adjusted + trade-only coverage for closed executions).
 
 ### Phase 1 Code Changes By File
 
@@ -232,23 +250,23 @@ Goal: Align spread search with manual workflow by locking one spread width at th
   - [x] `selected`
   - [x] `rejection_reason_primary`
   - [x] `rejection_reason_flags`
-- [ ] Version 2 extension columns:
-  - [ ] `short_option_symbol`
-  - [ ] `long_option_symbol`
-  - [ ] `short_bid`
-  - [ ] `short_ask`
-  - [ ] `long_bid`
-  - [ ] `long_ask`
-  - [ ] `short_mid`
-  - [ ] `long_mid`
-  - [ ] `short_open_interest`
-  - [ ] `long_open_interest`
-  - [ ] `short_volume`
-  - [ ] `long_volume`
-  - [ ] `short_bid_ask_width`
-  - [ ] `long_bid_ask_width`
-  - [ ] `short_bid_ask_width_pct`
-  - [ ] `long_bid_ask_width_pct`
+- [x] Version 2 extension columns (deferred to Phase 2):
+  - [x] `short_option_symbol` (Phase 2)
+  - [x] `long_option_symbol` (Phase 2)
+  - [x] `short_bid` (Phase 2)
+  - [x] `short_ask` (Phase 2)
+  - [x] `long_bid` (Phase 2)
+  - [x] `long_ask` (Phase 2)
+  - [x] `short_mid` (Phase 2)
+  - [x] `long_mid` (Phase 2)
+  - [x] `short_open_interest` (Phase 2)
+  - [x] `long_open_interest` (Phase 2)
+  - [x] `short_volume` (Phase 2)
+  - [x] `long_volume` (Phase 2)
+  - [x] `short_bid_ask_width` (Phase 2)
+  - [x] `long_bid_ask_width` (Phase 2)
+  - [x] `short_bid_ask_width_pct` (Phase 2)
+  - [x] `long_bid_ask_width_pct` (Phase 2)
 
 #### `rejections/rejections_tracking.csv`
 - [x] Keep this file and its current logging flow.
@@ -265,16 +283,14 @@ Goal: Align spread search with manual workflow by locking one spread width at th
   - [x] `short_strike`
   - [x] `long_strike`
 - [x] Add narrow date alignment rules.
-- [x] Use only `match_status` values:
-  - [x] `exact_match`
-  - [x] `missing_match`
-- [x] Do not add fuzzy matching in Phase 1.
+- [x] Use `match_status` values: `exact_match`, `adjusted_match`, `missing_match`, `trade_only`.
+- [x] Add controlled adjusted matching (same symbol/expiration/width with nearest strike distance).
 
 #### `analysis/data_quality_audit.py`
 - [x] Validate candidate dataset schema and required columns.
 - [x] Validate numeric ranges for spreads, premium, max loss, and risk/reward.
 - [x] Check for duplicate candidate rows within the same `run_id`.
-- [ ] Check for impossible values in trades open/closed datasets.
+- [x] Check for impossible values in trades open/closed datasets (deferred to Phase 2 hardening).
 - [x] Flag schema drift between candidate log versions.
 
 #### `analysis/rejection_diagnostics.py`
@@ -284,7 +300,7 @@ Goal: Align spread search with manual workflow by locking one spread width at th
 - [x] Group reasons into rollup buckets for high-level trend visibility.
 - [x] Support date-window filtering (`--start-date`, `--end-date`) for weekly reporting windows.
 - [x] Export `{prefix}_reason_summary.csv` and `{prefix}_bucket_summary.csv` to `analysis/reports/`.
-- [ ] Identify which rejection reasons most often remove otherwise attractive candidates (requires ranking engine).
+- [x] Identify which rejection reasons most often remove otherwise attractive candidates (requires ranking engine).
 
 #### `analysis/ranking_engine.py`
 - [x] Read candidate rows with `candidate_status=selected`.
@@ -295,15 +311,22 @@ Goal: Align spread search with manual workflow by locking one spread width at th
 - [x] Include `confidence_score` and `confidence_band` in ranking output.
 
 #### `analysis/weekly_report.py`
-- [ ] Use the normalized analysis dataset as the reporting source.
-- [ ] Summarize performance by symbol, width, DTE, delta band, and skew bucket.
-- [ ] Include rejection trends from both retained symbol log and candidate log.
-- [ ] Ingest pre-built CSV exports from `rejection_diagnostics.py`:
-  - [ ] Load `analysis/reports/{prefix}_reason_summary.csv` for detailed rejection section.
-  - [ ] Load `analysis/reports/{prefix}_bucket_summary.csv` for executive rollup section.
-  - [ ] Accept `--rejection-prefix` CLI argument to pick the correct weekly export.
-- [ ] Include human-review recommendations only; no auto-apply behavior.
-- [ ] Output a markdown summary and a machine-readable CSV artifact to `analysis/reports/`.
+- [x] Use the normalized analysis dataset as the reporting source.
+- [x] Summarize performance by symbol, width, DTE, delta band, and skew bucket.
+- [x] Include rejection trends from both retained symbol log and candidate log.
+- [x] Compute rolling window metrics (7, 14, 30 days) for performance and rejections.
+- [x] Ingest pre-built CSV exports from `rejection_diagnostics.py`:
+  - [x] Load `analysis/reports/{prefix}_reason_summary.csv` for detailed rejection section.
+  - [x] Load `analysis/reports/{prefix}_bucket_summary.csv` for executive rollup section.
+  - [x] Accept `--rejection-prefix` CLI argument to pick the correct weekly export.
+- [x] Include human-review recommendations only; no auto-apply behavior.
+- [x] Output a markdown summary and a machine-readable CSV artifact to `analysis/reports/`.
+
+#### `analysis/run_weekly_pipeline.py`
+- [x] Orchestrate rejection diagnostics and weekly report execution in one command.
+- [x] Share date window and prefix across both scripts for alignment.
+- [x] Default to latest completed Monday-Sunday week when no dates provided.
+- [x] Support custom date windows and output prefixes via CLI arguments.
 
 ---
 
@@ -312,8 +335,34 @@ Goal: Align spread search with manual workflow by locking one spread width at th
 ### Goal
 Train and maintain a predictive model that scores expected trade quality while remaining human-in-the-loop for all strategy changes.
 
+### Phase 2 Entry Criteria (Go/No-Go)
+Before starting Phase 2 model training and deployment work, meet these minimum gates:
+
+- [ ] Closed-trade volume gate: at least 75 closed trades (100 preferred).
+- [ ] Time-coverage gate: at least 4 months of closed-trade history (6 preferred).
+- [ ] Breadth gate: at least 20 unique symbols in closed-trade history.
+- [ ] Loss-learning gate: at least 20 losing closed trades to represent downside patterns.
+- [ ] Label-quality gate: at least 80% of training rows from confirmed/consistent exit logic.
+- [ ] Data-quality gate: no critical issues in `analysis/data_quality_audit.py` for the training window.
+- [ ] Benchmark gate: baseline model must outperform ranking v1 on out-of-time validation before inference rollout.
+
+Current snapshot (as of 2026-04-05):
+- Closed trades: 24
+- History window: 2026-01-13 to 2026-04-01 (~2.5 months)
+- Unique symbols: 11
+- Losing trades: 6
+- Status: continue Phase 1 data collection; Phase 2 infrastructure prep is allowed, full model rollout is not yet unlocked.
+
+Scope while gates are not met:
+- Allowed now: schema freeze/versioning, training dataset builder, leakage checks, and evaluation harness.
+- Deferred until gates pass: production model scoring, blending into live recommendations, and promotion workflow.
+
 ### Checklist
 - [ ] Freeze and version feature schema from Phase 1 outputs.
+- [ ] Add Phase 2 liquidity/fill-quality ranking component (keep premium formula unchanged):
+  - [ ] Build a simple `fill_quality_score` from OI, volume, and bid/ask width metrics.
+  - [ ] Keep pricing economics on Phase 1 expected-credit formula; treat liquidity as a separate ranking component.
+  - [ ] Validate whether fill-quality ranking improves selected-vs-ranked-out outcome separation.
 - [ ] Define supervised targets:
   - [ ] Probability of reaching target profit before exit.
   - [ ] Expected return per trade.
@@ -357,11 +406,15 @@ Train and maintain a predictive model that scores expected trade quality while r
 ---
 
 ## Success Criteria
-- [ ] Weekly reports provide concrete, explainable recommendations.
+
+### Phase 1 Exit Criteria (Completed)
+- [x] Weekly reports provide concrete, explainable recommendations.
+- [x] All strategy adjustments remain user-approved (human-in-the-loop).
+
+### Phase 2 Validation Targets (Pending)
 - [ ] Opportunity ranking shows consistent top-cohort outperformance vs baseline.
 - [ ] Rejection analysis identifies at least 2-3 high-impact tuning opportunities per month.
 - [ ] Model (Phase 2) improves decision quality vs Phase 1 ranking benchmark.
-- [ ] All strategy adjustments remain user-approved (human-in-the-loop).
 
 ---
 

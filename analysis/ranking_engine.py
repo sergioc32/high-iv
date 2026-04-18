@@ -27,13 +27,12 @@ from __future__ import annotations
 
 import argparse
 import csv
+import sys
 from bisect import bisect_left, bisect_right
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
-import sys
-from typing import Iterable, Optional
-import config
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CANDIDATES_PATH = PROJECT_ROOT / "opportunities" / "opportunity_candidates.csv"
@@ -42,6 +41,7 @@ DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "analysis" / "reports"
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+import config  # noqa: E402 (config is expected to be in the project root)
 
 LIQUIDITY_REASONS = {
     "short_bid_ask_width",
@@ -77,7 +77,7 @@ def load_csv_rows(path: Path) -> list[dict[str, str]]:
         return list(csv.DictReader(fh))
 
 
-def parse_float(value) -> Optional[float]:
+def parse_float(value) -> float | None:
     """Parse a float value, returning None for blanks and invalid text.
 
     Accepts both string fields (from CSV rows) and already-numeric values
@@ -94,7 +94,7 @@ def parse_float(value) -> Optional[float]:
         return None
 
 
-def parse_iso_date(value: object) -> Optional[date]:
+def parse_iso_date(value: object) -> date | None:
     """Parse an ISO-like date/datetime string into a date object."""
     raw = str(value or "").strip()
     if raw == "":
@@ -198,7 +198,7 @@ def build_calibration_set(rows: Iterable[dict[str, str]]) -> CalibrationSet:
 
 def percentile_rank(
     values: list[float], value: float, *, higher_is_better: bool
-) -> Optional[float]:
+) -> float | None:
     """Return a 0-1 percentile rank with tie averaging.
 
     When ``higher_is_better`` is False, values are scored so that lower raw
@@ -219,7 +219,7 @@ def percentile_rank(
     return midpoint / len(working_values)
 
 
-def recompute_ev_score(row: dict[str, str]) -> Optional[float]:
+def recompute_ev_score(row: dict[str, str]) -> float | None:
     """Compute ev_score when the stored column is blank or stale."""
     premium = parse_float(row.get("premium", ""))
     max_loss = parse_float(row.get("max_loss", ""))
@@ -232,7 +232,7 @@ def recompute_ev_score(row: dict[str, str]) -> Optional[float]:
 def liquidity_score(
     row: dict[str, str],
     rows_by_group: dict[tuple[str, str, str], list[dict[str, str]]],
-) -> tuple[Optional[float], int]:
+) -> tuple[float | None, int]:
     """Score liquidity based on sibling candidate resilience within the same run group."""
     group_key = (
         (row.get("run_id") or "").strip(),
@@ -253,7 +253,7 @@ def liquidity_score(
     return max(0.0, 1.0 - (liquidity_failures / total_candidates)), total_candidates
 
 
-def delta_preference_score(row: dict) -> Optional[float]:
+def delta_preference_score(row: dict) -> float | None:
     """Asymmetric piecewise delta preference score.
 
     Sub-target delta earns a linear bonus (up to RANK_DELTA_BONUS_MAX).
@@ -292,7 +292,7 @@ def delta_preference_score(row: dict) -> Optional[float]:
     return max(0.0, (1.0 - penalty_max) - (short_delta - penalty_steep) * slope)
 
 
-def skew_component_score(row: dict, calibration: CalibrationSet) -> Optional[float]:
+def skew_component_score(row: dict, calibration: CalibrationSet) -> float | None:
     """Weighted blend of skew_ratio and skew_diff percentile ranks.
 
     Weights are defined by RANK_SKEW_RATIO_WEIGHT and RANK_SKEW_DIFF_WEIGHT.
@@ -301,8 +301,8 @@ def skew_component_score(row: dict, calibration: CalibrationSet) -> Optional[flo
     ratio_weight = config.RANK_SKEW_RATIO_WEIGHT  # 0.55
     diff_weight = config.RANK_SKEW_DIFF_WEIGHT  # 0.45
 
-    ratio_score: Optional[float] = None
-    diff_score: Optional[float] = None
+    ratio_score: float | None = None
+    diff_score: float | None = None
 
     skew_ratio = parse_float(row.get("skew_ratio", ""))
     if skew_ratio is not None:
@@ -325,7 +325,7 @@ def skew_component_score(row: dict, calibration: CalibrationSet) -> Optional[flo
     return None
 
 
-def ev_component_score(row: dict, calibration: CalibrationSet) -> Optional[float]:
+def ev_component_score(row: dict, calibration: CalibrationSet) -> float | None:
     """Score the candidate's expected value percentile against historical selected candidates."""
     ev = parse_float(row.get("ev_score", "")) or recompute_ev_score(row)
     if ev is None or not calibration.ev_scores:
@@ -351,7 +351,7 @@ def directional_adjustment_factor(row: dict) -> float:
 
 
 def compute_alignment_flags(
-    row: dict, component_scores: dict[str, Optional[float]]
+    row: dict, component_scores: dict[str, float | None]
 ) -> str:
     """Return a comma-separated tag string describing alignment characteristics."""
     flags: list[str] = []
@@ -375,7 +375,7 @@ def compute_alignment_flags(
 
 
 def confidence_score(
-    component_scores: dict[str, Optional[float]],
+    component_scores: dict[str, float | None],
     calibration_count: int,
     group_size: int,
 ) -> tuple[float, str]:
@@ -398,7 +398,7 @@ def confidence_score(
     return score, band
 
 
-def weighted_total_score(component_scores: dict[str, Optional[float]]) -> float:
+def weighted_total_score(component_scores: dict[str, float | None]) -> float:
     """Combine component scores into a 0-100 total rank score."""
     available_weights = {
         name: weight
@@ -416,7 +416,7 @@ def weighted_total_score(component_scores: dict[str, Optional[float]]) -> float:
     return total * 100.0
 
 
-def summarize_strengths(component_scores: dict[str, Optional[float]]) -> str:
+def summarize_strengths(component_scores: dict[str, float | None]) -> str:
     """Create a compact human-readable explanation from component scores."""
     present = [
         (name, value) for name, value in component_scores.items() if value is not None
@@ -469,7 +469,7 @@ def rank_selected_candidates(
 
     for row in selected_rows:
         liquidity, group_size = liquidity_score(row, rows_by_group)
-        component_scores: dict[str, Optional[float]] = {
+        component_scores: dict[str, float | None] = {
             "delta": delta_preference_score(row),
             "skew": skew_component_score(row, calibration),
             "ev": ev_component_score(row, calibration),
@@ -682,7 +682,7 @@ def score_opportunities(opportunities: list[dict]) -> list[dict]:
             "earnings_within_dte": opp.get("earnings_within_dte"),
         }
 
-        component_scores: dict[str, Optional[float]] = {
+        component_scores: dict[str, float | None] = {
             "delta": delta_preference_score(proxy),
             "skew": skew_component_score(proxy, calibration),
             "ev": ev_component_score(proxy, calibration),

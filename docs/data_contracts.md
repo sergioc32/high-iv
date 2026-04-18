@@ -24,6 +24,7 @@ Candidate-level, entry-time dataset. One row per evaluated spread candidate.
 ### Field contract
 - run_id: string, required
 - snapshot_ts: string, required, ISO-8601
+- strategy_version: string, required for new rows, strategy engine label (for example v1_conservative, v2_dynamic)
 - symbol: string, required
 - expiration_date: string, required, YYYY-MM-DD
 - dte: integer, required, days
@@ -31,6 +32,12 @@ Candidate-level, entry-time dataset. One row per evaluated spread candidate.
 - short_strike: float, required, USD
 - long_strike: float, optional, USD
 - width: float, optional, USD
+- credit_mid: float, optional, USD per contract, midpoint credit estimate
+- credit_natural: float, optional, USD per contract, worst-case fill estimate
+- credit_expected: float, optional, USD per contract, modeled fill between natural and mid
+- fill_quality: float, optional, unitless, credit_expected / credit_mid when credit_mid > 0
+- avg_width_pct: float, optional, unitless, average of short/long bid-ask width as pct of mid
+- mid_weight: float, optional, unitless, dynamic midpoint weight used in credit_expected
 - premium: float, optional, USD per contract
 - premium_per_width: float, optional, unitless, premium / (width * 100)
 - max_profit: float, optional, USD per contract
@@ -53,7 +60,8 @@ Candidate-level, entry-time dataset. One row per evaluated spread candidate.
 - selected=False => candidate_status must be rejected.
 - selected=False may include reasons such as:
   - selected_ranked_out
-  - credit_conservative
+  - credit_natural_too_low
+  - credit_expected_too_low
   - risk_reward
   - short_bid_ask_width
   - long_bid_ask_width
@@ -78,6 +86,12 @@ Use one candidate row as five blocks:
 - earnings_within_dte
 
 3. Trade economics: what does the spread pay and risk?
+- credit_mid: midpoint-based credit estimate
+- credit_natural: worst-case fill estimate
+- credit_expected: modeled credit used for economics and ranking
+- fill_quality: expected credit as a fraction of midpoint credit
+- avg_width_pct: combined market width quality signal used in fill modeling
+- mid_weight: midpoint weight used to build expected credit
 - premium: credit received per contract in USD
 - max_loss: worst-case loss per contract in USD
 - risk_reward_ratio: max_loss / premium
@@ -99,7 +113,8 @@ Use one candidate row as five blocks:
 
 Quick interpretation examples:
 - selected=True: this spread was chosen for that symbol/run.
-- rejected + credit_conservative: spread failed the minimum conservative credit rule.
+- rejected + credit_natural_too_low: spread failed the execution-sanity floor on natural credit.
+- rejected + credit_expected_too_low: spread failed the expected-credit per-width economics rule.
 - rejected + selected_ranked_out: spread passed filters but lost ranking to another valid candidate.
 
 ---
@@ -120,7 +135,7 @@ Normalized analytics table joining candidate rows with trade lifecycle fields.
 
 ### Entry-time feature columns
 - Identity and structure: run_id, snapshot_ts, symbol, expiration_date, dte, stock_price, short_strike, long_strike, width
-- Spread metrics: premium, premium_per_width, max_profit, max_loss, risk_reward_ratio, ev_score
+- Spread metrics: credit_mid, credit_natural, credit_expected, fill_quality, avg_width_pct, mid_weight, premium, premium_per_width, max_profit, max_loss, risk_reward_ratio, ev_score
 - Option metrics: short_delta, short_iv, atm_iv, skew_ratio, skew_diff
 - Context: earnings_within_dte
 - Candidate metadata: candidate_status, selected, rejection_reason_primary, rejection_reason_flags

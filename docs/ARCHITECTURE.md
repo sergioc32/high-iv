@@ -1,534 +1,335 @@
 # Architecture Overview
 
-This document outlines the design and architecture of the High IV Options Screener application.
+This document outlines the current design and architecture of the High IV Options Screener application.
 
 ## High-Level Architecture
 
+The application is organized around a thin entrypoint and focused service modules.
+
+```text
+main.py
+  +- SnapshotService
+  +- PositionSyncService
+  �   +- ClosedTradeReconciliationService
+  +- ScreenerRunService
+  �   +- IVScreener
+  �   +- SpreadAnalyzer
+  �   +- PersistenceService
+  +- SnapshotService
+
+TastytradeAPI
+  +- watchlists
+  +- market metrics
+  +- equity quotes
+  +- option chains
+  +- option quotes
+  +- account positions
+  +- paginated account orders
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                         main.py                              │
-│                   (Application Entry Point)                  │
-└──────────────┬──────────────────────────────────────────────┘
-               │
-               ├──────────────┬──────────────┬─────────────────┐
-               │              │              │                 │
-        ┌──────▼──────┐  ┌───▼────┐  ┌─────▼──────┐  ┌──────▼──────┐
-        │   API Layer │  │Screener│  │  Utilities │  │Configuration│
-        │             │  │ Layer  │  │            │  │             │
-        └─────────────┘  └────────┘  └────────────┘  └─────────────┘
-               │
-        ┌──────▼───────────────────────────────────┐
-        │      Tastytrade REST API                 │
-        │   (External Data Source)                 │
-        └──────────────────────────────────────────┘
-```
+
+## Main Architectural Idea
+
+The codebase now separates responsibilities into four main layers:
+
+1. `main.py`
+   - CLI parsing
+   - top-level command dispatch
+   - authentication bootstrap
+   - high-level runtime flow
+
+2. `api/`
+   - Tastytrade HTTP interactions
+   - response parsing and normalization
+   - pagination for account orders
+
+3. `services/`
+   - application workflows and persistence boundaries
+   - position sync and closed-trade reconciliation
+   - weekly snapshots
+   - screener orchestration
+
+4. `screener/` and `analysis/`
+   - domain-specific strategy logic
+   - offline analytics and reporting
 
 ## Components
 
 ### 1. Main Application (`main.py`)
 
-**Responsibility**: Orchestrates the entire screening workflow
+**Responsibility**: Thin composition root for command routing and top-level orchestration.
 
-**Key Functions**:
-- Loads environment configuration
-- Manages authentication flow
-- Coordinates screening pipeline stages
-- Handles error recovery and logging
-- Controls output and CSV export
+**Responsibilities kept in `main.py`:**
+- parse CLI flags
+- choose between cache clearing, snapshotting, sync-only, and full screener modes
+- authenticate the API client
+- display top-level summaries and status banners
+- delegate real work to services
 
-**Workflow**:
-1. Authentication
-2. Watchlist discovery and symbol fetching
-3. Market metrics batch retrieval
-4. IV rank filtering
-5. Options chain analysis
-6. Spread evaluation and EV-based candidate selection
-7. Weighted strategy-alignment scoring (live batch)
-8. Results display and export
+## 2. API Layer (`api/tastytrade.py`)
 
-### 2. API Layer (`api/tastytrade.py`)
+**Responsibility**: Encapsulates all Tastytrade API interactions.
 
-**Responsibility**: Encapsulates all Tastytrade API interactions
+**Important methods:**
+- `authenticate()`
+- `get_watchlist()`
+- `get_market_metrics()`
+- `get_quotes_batch()`
+- `get_option_expirations()`
+- `get_option_chain()`
+- `get_option_quotes()`
+- `get_account_positions()`
+- `get_account_orders()`
 
-**Design Pattern**: Wrapper/Facade pattern for clean API abstraction
+### Order History Retrieval Modes
 
-**Key Classes**:
-- `TastytradeAPI`: Main API client with session management
+`get_account_orders()` supports two usage patterns:
 
-**Key Methods**:
-- `authenticate()`: Session creation and token management
-- `list_watchlists()`: Discover available watchlists (public/private)
-- `get_watchlist()`: Fetch symbols from named watchlists
-- `get_market_metrics()`: Batch retrieve IV rank/percentile
-- `get_quotes_batch()`: Batch equity quotes with pricing
-- `get_option_expirations()`: Available expiration dates per symbol
-- `get_option_chain()`: Strike prices and option symbols
-- `get_option_quotes()`: Option pricing and greeks
-- `batch_request_with_delay()`: Rate-limited batch processing
+- **Lightweight mode**
+  - used by normal sync/reconciliation
+  - bounded by `ORDER_HISTORY_MAX_PAGES`
+  - intended to fetch only recent filled orders for newly closed trades
 
-**Features**:
-- Session token caching
-- Automatic retry logic (via requests library)
-- URL encoding for special characters
-- Response parsing and normalization
-- Error handling with descriptive messages
+- **Deep pagination mode**
+  - used by the one-off historical backfill tool
+  - can disable page caps and walk until the age cutoff is reached
+  - intended for older closed-trade recovery
 
-### 3. Screener Layer (`screener/`)
+## 3. Services Layer (`services/`)
 
-#### 3.1 IV Screener (`iv_screener.py`)
+### 3.1 Position Sync Service (`position_sync_service.py`)
 
-**Responsibility**: Filters stocks by implied volatility metrics
+**Responsibility**: Build the live open-trade snapshot and detect newly closed trades.
 
-**Key Class**: `IVScreener`
+**Flow:**
+1. call `get_account_positions()`
+2. call `parse_option_spreads()`
+3. enrich rows with current quotes
+4. compute exit signals and display-ready views
+5. write `trades/trades_open.csv`
+6. compare prior open snapshot against current open snapshot
+7. identify disappeared `trade_id` values
+8. reconcile new closures against recent filled orders
+9. append rows to `trades/trades_closed.csv`
 
-**Methods**:
-- `filter_by_iv_rank()`: Applies IV rank threshold filter
-- `get_top_candidates()`: Limits candidates for deeper analysis
-- `display_screening_results()`: Formatted console output
+### 3.2 Closed Trade Reconciliation Service (`closed_trade_reconciliation_service.py`)
 
-**Data Processing**:
-- Converts API data to pandas DataFrame
-- Handles missing/invalid values (coercion to numeric)
-- Sorts by IV rank descending
+**Responsibility**: Match newly disappeared spreads to actual order fills.
 
-#### 3.2 Spread Analyzer (`spread_analyzer.py`)
+**Current first-pass matching behavior:**
+- exact underlying symbol match
+- exact short-leg symbol with `Buy to Close`
+- exact long-leg symbol with `Sell to Close`
+- only `Filled` orders
 
-**Responsibility**: Evaluates put credit spread opportunities, ranks candidates by EV score, and writes all evaluated candidates to the candidate log.
+**Actual close source precedence:**
+1. leg-fill-derived net close value
+2. order-level `price` with `price-effect`
+3. fallback to estimated value from prior open snapshot
 
-**Key Class**: `SpreadAnalyzer`
+**Result fields produced downstream:**
+- `close_debit`
+- `close_debit_estimated`
+- `close_debit_actual`
+- `actual_exit_found`
+- `exit_price_source`
+- `close_fill_timestamp`
+- `close_order_id`
+- `match_confidence`
 
-**Methods**:
-- `find_target_expiration()`: Selects expiration closest to target DTE
-- `find_strike_by_delta()`: Identifies strikes matching target delta
-- `find_spread_strikes()`: Constructs optimal spread pairs with shift candidates
-- `check_bid_ask_width()`: Applies asymmetric liquidity thresholds by leg type
-- `evaluate_spread()`: Calculates premium, risk, R/R ratio, and EV score
-- `filter_opportunities()`: Applies final criteria filters
-- `_log_candidate()`: Appends one row per evaluated spread to `opportunity_candidates.csv`
-- Strike increment detection: adapts to $1/$5/$10 ladders within a configurable max increment
+### 3.3 Snapshot Service (`snapshot_service.py`)
 
-**Anchor and Shift Strategy**:
-- Sell put anchor selected at closest delta to `TARGET_DELTA` (0.16).
-- Anchor width determined by precedence: `PREFERRED_SPREAD_WIDTH` → `FALLBACK_SPREAD_WIDTH` → `MAX_STRIKE_INCREMENT`.
-- Width is locked for all shift candidates in a run — no mixed widths within a symbol/expiration.
-- Shift candidates are generated by walking the option strike ladder by index (not by dollar multiples), keeping the locked width.
-- `SKEW_WINDOW_OTM` controls how many OTM (lower-delta, lower-strike) shifts to evaluate.
-- `SKEW_WINDOW_ITM` controls how many ITM (higher-delta, higher-strike) shifts to evaluate.
-- Hard ATM/ITM guard: any shift where short_strike ≥ stock_price is immediately rejected with reason `itm_or_atm`.
-- Delta is **not** used as a hard filter on shift candidates; it is used only for anchor selection and as an input to EV scoring.
-- Liquidity is checked asymmetrically per leg: short leg uses tighter bid/ask limits than long leg, and each leg passes if either absolute-width or percent-of-mid thresholds pass.
-- Open interest checks are per-leg (`MIN_OPTION_OPEN_INTEREST_SHORT_LEG`, `MIN_OPTION_OPEN_INTEREST_LONG_LEG`) when OI filtering is enabled.
-- Credit conservatism uses worst-case fill (`short_bid - long_ask`) against `MIN_CREDIT_PER_WIDTH`; final premium metrics use mid prices.
-- Candidates are ranked by `ev_score = (premium / max_loss) * (1 - short_delta)` (probability-of-profit-weighted return efficiency).
-- The anchor is replaced only if a shift candidate's EV score exceeds anchor EV by at least `MIN_SCORE_IMPROVEMENT_PCT`.
-- All valid-but-non-selected candidates are logged with reason `selected_ranked_out`.
+**Responsibility**: Create and backfill weekly state snapshots.
 
-**Candidate Log Durability**:
-- Candidate and rejection CSV writers include schema-migration safeguards that backfill newly added columns before appending rows, preserving append-only logs across schema evolution.
+**Writes:**
+- `snapshots/snapshot_<week>.json`
 
-**Rejection Reasons Logged**:
-- `delta_bounds` / `delta_bounds_min` / `delta_bounds_max` / `delta_bounds_missing`: Short leg delta out of range (anchor selection only).
-- `itm_or_atm`: Shift short strike at or above stock price.
-- `short_bid_ask_width` / `long_bid_ask_width`: Leg spread too wide for fillability.
-- `short_leg_missing_quote` / `long_leg_missing_quote`: Quote unavailable for a leg.
-- `long_strike_unavailable`: Long strike does not exist on the ladder.
-- `no_long_strike`: No valid long strike found after width lock.
-- `credit_conservative`: Premium per width below `MIN_CREDIT_PER_WIDTH`.
-- `premium_zero_or_negative`: Spread has zero or negative credit.
-- `risk_reward`: Risk/reward ratio above `MAX_RISK_REWARD_RATIO`.
-- `open_interest`: OI on a leg below minimum threshold.
-- `selected_ranked_out`: Candidate passed all filters but lost ranking to a higher-EV candidate.
+### 3.4 Screener Run Service (`screener_run_service.py`)
 
-Target 45 DTE with ±14 day tolerance.
+**Responsibility**: Orchestrate the end-to-end screening pipeline.
 
-### 4. Utilities (`utils/display.py`)
+**Flow:**
+1. fetch symbols from configured watchlists
+2. fetch market metrics and equity quotes
+3. apply IV screening
+4. fetch option expirations, chains, and option quotes
+5. evaluate spreads through `SpreadAnalyzer`
+6. filter and score final opportunities
+7. hand persistence to `PersistenceService`
 
-**Responsibility**: Console output formatting and user feedback
+### 3.5 Persistence Service (`persistence_service.py`)
 
-**Key Functions**:
-- `print_header()`: Application banner
-- `print_progress()`: Stage indicators
-- `display_opportunities()`: Formatted trade table
-- `display_summary()`: Execution statistics
+**Responsibility**: Centralized CSV writing.
 
-**Design**: Separation of presentation from business logic
+**Writes:**
+- `trades/trades_open.csv`
+- `opportunities/opportunities_YYYYMMDD_HHMMSS[_indicative].csv`
 
-### 5. Configuration (`config.py`)
+### 3.6 Typed Result Models (`run_models.py`)
 
-**Responsibility**: Centralized parameter management
+**Responsibility**: Service-boundary dataclasses for predictable orchestration results.
 
-**Categories**:
-- Screening criteria (IV thresholds, liquidity)
-- Options parameters (DTE, delta targets)
-- Spread configuration (width, risk limits)
-- Skew optimization window and score threshold
-- Asymmetric liquidity thresholds and per-leg OI minimums
-- Ranking engine controls (component weights, delta preference curve, skew blend, directional multipliers)
-- Display settings (result limits, auto-save)
-- Watchlist definitions
+## 4. Screener Layer (`screener/`)
 
-**Key skew/shift parameters**:
-- `SKEW_WINDOW_OTM`: Number of OTM shift candidates to evaluate from anchor (default: 2)
-- `SKEW_WINDOW_ITM`: Number of ITM shift candidates to evaluate from anchor (default: 1)
-- `MIN_SCORE_IMPROVEMENT_PCT`: Minimum EV score improvement % required to replace anchor with a shifted candidate (default: 5)
+### 4.1 IV Screener (`iv_screener.py`)
 
-**Design**: Single source of truth for tuneable parameters
+**Responsibility**: Apply IV and liquidity filters to the initial symbol universe.
 
-### 6. Analytics Pipeline (`analysis/`)
+### 4.2 Spread Analyzer (`spread_analyzer.py`)
 
-**Responsibility**: Offline analysis, data quality, rejection diagnostics, and reporting from candidate and trade history.
+**Responsibility**: Evaluate candidate put credit spreads.
 
-#### 6.1 Build Analysis Dataset (`build_analysis_dataset.py`)
+**Internal supporting modules:**
+- `spread_models.py`
+- `spread_scoring.py`
+- `spread_logging.py`
 
-**Purpose**: Join `opportunity_candidates.csv` (entry-time features) with `trades_open.csv` and `trades_closed.csv` (outcome-time fields) for reporting.
+**Key behaviors:**
+- anchor strike selection
+- OTM/ITM shift evaluation
+- width locking
+- credit and liquidity filtering
+- EV scoring
+- candidate logging and rejection logging
 
-**Key Behavior**:
-- Strict key matching on `symbol`, `expiration_date`, `short_strike`, `long_strike`.
-- Outputs `analysis/analysis_dataset.csv` with `match_status` = `exact_match` or `missing_match`.
-- Entry-time fields are never mixed with post-entry outcome fields to prevent leakage.
-- Paths resolved relative to project root; safe to run from any working directory.
+## 5. Analytics Layer (`analysis/`)
 
-#### 6.2 Data Quality Audit (`data_quality_audit.py`)
+**Responsibility**: Offline review and reporting from stored candidate and trade history.
 
-**Purpose**: Validate the candidate log and analysis dataset before reporting.
+**Key scripts:**
+- `build_analysis_dataset.py`
+- `data_quality_audit.py`
+- `rejection_diagnostics.py`
+- `ranking_engine.py`
+- `weekly_report.py`
+- `run_weekly_pipeline.py`
+- `run_weekly_closeout.py`
 
-**Checks**:
-- Schema drift: detects missing or extra columns versus expected Version 1 schema.
-- Range validation: flags impossible values (negative width, zero max_loss, etc.).
-- Duplicate detection: identifies duplicate `run_id` + identity key blocks.
-- Suppresses expected noise from intentionally rejected rows with negative economics.
+## 6. Data Flow
 
-#### 6.3 Rejection Diagnostics (`rejection_diagnostics.py`)
+### Open Trade Flow
 
-**Purpose**: Summarize and compare rejection data from both logs to identify filter bottlenecks.
-
-**Report Sections**:
-- Symbol-level counter aggregation from `rejections_tracking.csv`.
-- Candidate-level reason aggregation from `opportunity_candidates.csv`.
-- Rollup bucket totals (delta / liquidity / pricing_economics / structure / data_quotes / selection).
-- Reason name coverage comparison between both logs.
-- CSV exports written to `analysis/reports/` for weekly report ingestion.
-
-**CLI Options**:
-```bash
-python analysis/rejection_diagnostics.py [--top-n N] [--start-date YYYY-MM-DD] [--end-date YYYY-MM-DD]
-    [--export-dir PATH] [--export-prefix PREFIX]
-    [--symbol-log PATH] [--candidate-log PATH]
+```text
+accounts/{account}/positions
+        ?
+TastytradeAPI.get_account_positions()
+        ?
+TastytradeAPI.parse_option_spreads()
+        ?
+PositionSyncService
+        ?
+trades/trades_open.csv
 ```
 
-**Exported Files** (written to `analysis/reports/` by default):
-- `{prefix}_reason_summary.csv`: Detailed reason counts by source.
-- `{prefix}_bucket_summary.csv`: Rollup bucket counts by source.
+### New Closed Trade Flow
 
-#### 6.4 Ranking Engine (`ranking_engine.py`)
-
-**Purpose**: Rank selected opportunities using deterministic, explainable entry-time component scores. Supports both offline run ranking and live in-memory scoring.
-
-**Inputs**:
-- `opportunities/opportunity_candidates.csv`
-- Ranking configuration from `config.py` (`RANK_WEIGHT_*`, `RANK_DELTA_*`, `RANK_SKEW_*`, directional multipliers)
-
-**Scoring Components**:
-- `delta`: Asymmetric piecewise preference around `RANK_DELTA_TARGET`; OTM-side bonus and above-target penalties with steepening past `RANK_DELTA_PENALTY_STEEP`.
-- `skew`: Weighted blend of percentile-ranked `skew_ratio` and `skew_diff` using `RANK_SKEW_RATIO_WEIGHT` and `RANK_SKEW_DIFF_WEIGHT`.
-- `ev`: Percentile rank of EV score vs selected-candidate calibration set.
-- `liquidity`: Sibling-candidate resilience proxy from liquidity-related rejections in the same run/symbol/expiration group.
-
-**Score Construction**:
-- Weighted base score: normalized weighted average of available components, scaled to 0-100.
-- Directional adjustment:
-     - OTM (`short_delta < RANK_DELTA_TARGET`): multiply by `RANK_OTM_BONUS_MULTIPLIER`
-     - ITM drift (`short_delta > RANK_DELTA_PENALTY_STEEP`): multiply by `RANK_ITM_PENALTY_MULTIPLIER`
-- Final score: `strategy_alignment_score` (with `total_rank_score` retained as backward-compatible alias).
-
-**Confidence Model**:
-- `confidence_score = 0.50 * feature_coverage + 0.35 * historical_support + 0.15 * sibling_support`
-- `confidence_band` thresholds:
-     - `high` for score ≥ 0.80
-     - `medium` for score ≥ 0.60 and < 0.80
-     - `low` otherwise
-
-**Outputs**:
-- `strategy_alignment_score` on a 0-100 scale.
-- Per-component explainability fields (`delta_preference_component`, `skew_component`, `ev_component`, `liquidity_component`).
-- Alignment diagnostics (`alignment_flags`, `delta_zone`, `directional_adjustment`, `explanation_summary`).
-- `confidence_score` and `confidence_band`.
-- CSV export to `analysis/reports/opportunity_rankings_<run_id>.csv`.
-
-**Live Scoring Path (Main Flow Integration)**:
-- `main.py` applies `score_opportunities()` to the final filtered opportunity batch before display/export.
-- Live mode uses within-batch percentile calibration for skew and EV components and a neutral liquidity component when sibling rejection context is not present.
-
-### 7. Utilities Layer (`utils/`)
-
-#### 7.1 Display Module (`display.py`)
-
-**Responsibility**: Formatted console output and result presentation
-
-**Key Functions**:
-- `print_header()`: Section dividers and status messages
-- `display_opportunities()`: Formatted table of trade opportunities
-- `display_summary()`: Execution summary statistics
-- `print_progress()`: Progress indicators with spinner
-
-#### 7.2 Market Hours Module (`market_hours.py`)
-
-**Responsibility**: Detect market status for data quality flagging
-
-**Key Functions**:
-- `is_market_open()`: Returns True if US market currently open (9:30 AM - 4:00 PM ET, weekdays)
-- `get_market_status_display()`: Returns 'OPEN' or 'CLOSED' for banner display
-
-**Integration**:
-- Called at screener start to set market context
-- After-hours results saved with `_indicative` filename suffix
-- Banner displayed: "🔕 MARKET STATUS: CLOSED ⚠ Results are indicative only"
-
-#### 7.3 Cache Module (`cache.py`)
-
-**Responsibility**: Lightweight file-based cache for API responses
-
-**Key Concepts**:
-- Per-key TTLs tuned by data volatility
-- SHA1-hashed filenames for safe storage
-- Best-effort writes (cache never blocks execution)
-- Endpoint-aware keys: `session_token:<user>`, `watchlist:<scope>:<name>`, `metrics:<symbol>`, `quote:<symbol>`, `expirations:<symbol>`, `chain:<symbol>:<exp>`, `optquote:<optionSymbol>`
-
-## Data Flow
-
-### Phase 1: Symbol Collection
-```
-Environment (.env) → Authentication → Watchlists API
-                                           ↓
-                               Symbol List Aggregation
-                                           ↓
-                                    Deduplication
+```text
+previous trades_open.csv + current positions snapshot
+        ?
+PositionSyncService detects disappeared trade_id values
+        ?
+TastytradeAPI.get_account_orders()  [lightweight recent pagination]
+        ?
+ClosedTradeReconciliationService
+        ?
+trades/trades_closed.csv
 ```
 
-### Phase 2: IV Screening
-```
-Symbol List → Market Metrics API (batch) → IV Rank Data
-                                                ↓
-                                    DataFrame Processing
-                                                ↓
-                                    Filtering & Sorting
-                                                ↓
-                                    Top N Candidates
-```
+### Historical Closed Trade Backfill Flow
 
-### Phase 3: Options Analysis
-```
-Candidates → Batch Stock Quotes → Current Prices
-     ↓
-Option Expirations API → Expiration Selection
-     ↓
-Option Chains API → Strike Symbols (full ladder)
-     ↓
-Option Quotes API (batch) → Greeks & Pricing
-     ↓
-Anchor Strike Selection (closest delta to TARGET_DELTA)
-     ↓
-Width Lock (PREFERRED → FALLBACK → MAX_STRIKE_INCREMENT)
-     ↓
-Shift Candidate Generation (strike-index walk, OTM × SKEW_WINDOW_OTM, ITM × SKEW_WINDOW_ITM)
-     ↓
-Per-Candidate Filters (ATM/ITM guard, bid-ask, credit, OI, risk-reward)
-     ↓
-EV Score Ranking → Best Candidate Selected / Others → selected_ranked_out
-     ↓
-Candidate Logging → opportunity_candidates.csv (one row per evaluated candidate)
-     ↓
-Rejection Tracking → rejections_tracking.csv (symbol-level counters)
+```text
+trades/trades_closed.csv
+        ?
+backfill_closed_trade_actuals.py
+        ?
+TastytradeAPI.get_account_orders()  [deep pagination]
+        ?
+historical strike/expiration matching
+        ?
+update actual close values + recalculate dependent P/L metrics
 ```
 
-### Phase 4: Output
-```
-Opportunities → EV-based shortlist (SpreadAnalyzer.filter_opportunities)
-               ↓
-Weighted live scoring (`score_opportunities`) → strategy_alignment_score + flags
-               ↓
-Console Display + Market Status Banner
-               ↓
-CSV Export (with _indicative suffix if after-hours)
-              
-Rejections → Append to rejections/rejections_tracking.csv
-Candidates → Append to opportunities/opportunity_candidates.csv
-```
+### Screener Flow
 
-### Phase 5: Analytics (Offline)
-```
-opportunity_candidates.csv ─────────────────────────────────┐
-                                                             ↓
-trades_open.csv + trades_closed.csv  →  build_analysis_dataset.py
-                                                             ↓
-                                               analysis_dataset.csv
-                                                             ↓
-                         ┌───────────────────────────────────┤
-                         ↓                                   ↓
-          data_quality_audit.py                rejection_diagnostics.py
-          (schema + range checks)              (rollup buckets + CSV exports)
-                                                             ↓
-                                               analysis/reports/*.csv
-                                               (consumed by weekly_report.py)
+```text
+watchlists
+  ?
+market metrics + quotes
+  ?
+IV screening
+  ?
+option expirations + chains + option quotes
+  ?
+SpreadAnalyzer evaluation
+  ?
+PersistenceService export + console display
 ```
 
-## Rejection Tracking System
+## 7. Trade Tracking Model
 
-There are two complementary rejection logs with different granularities.
+### Open Trades
 
-### Symbol-Level Log: `rejections/rejections_tracking.csv`
+`trades/trades_open.csv` is the live snapshot of currently held spreads.
 
-**Purpose**: Per-run, per-symbol counter aggregates for dashboard-level trend analysis.
+Source of truth:
+- current account positions
+- parsed into spread rows
 
-**Columns**:
-- `timestamp`: When the run occurred
-- `symbol`: Stock symbol analyzed
-- `delta_bounds`: Count rejected at delta check (anchor selection stage)
-- `delta_bounds_min`: Count with delta below MIN_DELTA
-- `delta_bounds_max`: Count with delta above MAX_DELTA
-- `delta_bounds_missing`: Count with missing delta data
-- `itm_or_atm`: Count of shift candidates rejected because short_strike ≥ stock_price
-- `long_strike_unavailable`: Count where long strike does not exist on the ladder
-- `short_leg_missing_quote`: Count where short leg quote was unavailable
-- `long_leg_missing_quote`: Count where long leg quote was unavailable
-- `open_interest`: Count rejected for insufficient OI
-- `short_bid_ask_width`: Count rejected for short leg bid/ask too wide
-- `long_bid_ask_width`: Count rejected for long leg bid/ask too wide
-- `credit_conservative`: Count rejected for premium per width below minimum
-- `premium_zero_or_negative`: Count rejected for invalid premium
-- `risk_reward`: Count rejected for risk/reward > MAX_RISK_REWARD_RATIO
-- `no_long_strike`: Count where no valid long strike was found
-- `total_rejections`: Sum of all rejection categories
+### Closed Trades
 
-### Candidate-Level Log: `opportunities/opportunity_candidates.csv`
+`trades/trades_closed.csv` is created when a previously open spread disappears from the live snapshot.
 
-**Purpose**: One row per evaluated spread candidate with full entry-time feature set.
+This means the system still detects the event of closure by snapshot diffing, but now improves the exit price source by reconciling against order history.
 
-**Key fields**: `candidate_status` (`selected` / `rejected`), `rejection_reason_primary`, `rejection_reason_flags`, `ev_score`.
+### Close Value Semantics
 
-See `docs/data_contracts.md` for the full Version 1 schema.
+- `close_debit`: canonical best-known close value
+- `close_debit_estimated`: estimate derived from prior open-position mark
+- `close_debit_actual`: broker-confirmed close value when matched
 
-**Data Interpretation**:
-- Max candidates per symbol/expiration = 1 (anchor) + `SKEW_WINDOW_OTM` + `SKEW_WINDOW_ITM`
-- High `short_bid_ask_width` + `long_bid_ask_width` on choppy days → liquidity filter too strict
-- High `delta_bounds` → delta window too narrow
-- High `structure` bucket → sparse chains or too many near-ATM strikes
-- Use `analysis/rejection_diagnostics.py` to produce rollup bucket summaries across both logs
+For accurate realized economics, the system prefers actual leg-fill-derived net close values.
 
-## Design Patterns
+## 8. Configuration Areas
 
-### 1. Facade Pattern
-`TastytradeAPI` provides a simplified interface to complex API interactions, hiding:
-- HTTP request details
-- Response parsing complexity
-- Error handling nuances
-- URL encoding logic
+`config.py` currently groups configuration into:
+- screening thresholds
+- spread construction and liquidity rules
+- ranking/scoring controls
+- cache TTLs
+- watchlists
+- exit alerts
+- order-history reconciliation controls
 
-### 2. Strategy Pattern
-`SpreadAnalyzer` encapsulates the put spread evaluation algorithm, allowing:
-- Easy swapping of different spread strategies
-- Configuration-driven parameter tuning
-- Testable business logic
+Relevant trade-tracking settings:
+- `ORDER_HISTORY_LOOKBACK_DAYS`
+- `ORDER_HISTORY_MAX_PAGES`
 
-### 3. Data Pipeline Pattern
-`main.py` implements a clear ETL (Extract-Transform-Load) pipeline:
-- Extract: API data retrieval
-- Transform: Filtering, calculations, enrichment
-- Load: Display and CSV export
+## 9. Key Files Added in the Current Refactor
 
-## Error Handling Strategy
+- `services/position_sync_service.py`
+- `services/snapshot_service.py`
+- `services/screener_run_service.py`
+- `services/persistence_service.py`
+- `services/closed_trade_reconciliation_service.py`
+- `backfill_closed_trade_actuals.py`
+- `screener/spread_models.py`
+- `screener/spread_scoring.py`
+- `screener/spread_logging.py`
 
-### Levels:
-1. **API Level**: HTTP errors, timeouts, malformed responses
-2. **Data Level**: Missing values, type conversions, empty results
-3. **Application Level**: Invalid configuration, missing credentials
+## 10. Design Notes
 
-### Approach:
-- Graceful degradation (fallback to hardcoded symbols)
-- Descriptive error messages with context
-- Continue processing on individual failures
-- Summary reporting of errors
+- `main.py` is intentionally small and orchestration-focused.
+- Normal trade reconciliation should remain lightweight and incremental.
+- Historical cleanup is intentionally separated into a one-off tool so normal runtime stays fast.
+- Actual close values should prefer fill-derived economics over submitted order limits.
 
-## Performance Considerations
+## 11. Future Enhancements
 
-### Optimization Techniques:
-1. **Batch API Requests**: Reduces round-trips
-2. **Rate Limiting**: Respects API constraints
-3. **Early Filtering**: Limits downstream processing
-4. **Lazy Loading**: Fetches greeks only for viable candidates
-5. **File Cache with TTLs**: Reuses session, watchlist, chain, and quote payloads per endpoint volatility
-
-### Current Bottlenecks:
-- Sequential options analysis (could be parallelized)
-- API rate limits on option quotes
-- Cache misses on first-run or rapidly changing option quote data
-
-## Future Enhancements
-
-### Scalability:
-- Parallel options analysis (threading/async)
-- Database storage for historical tracking
-
-### Features:
-- Multiple spread strategies (iron condors, calendars)
-- Backtesting framework
-- Real-time monitoring mode
-- Web dashboard
-
-### Architecture:
-- Separate data layer (repository pattern)
-- Event-driven architecture for real-time updates
-- Microservices for different screener strategies
-
-## Dependencies
-
-### External:
-- `requests`: HTTP client for API calls
-- `pandas`: Data manipulation and analysis
-- `python-dotenv`: Environment variable management
-- `tabulate`: Table formatting (via pandas)
-
-### Python Standard Library:
-- `os`, `sys`: System operations
-- `time`: Delays and timestamps
-- `typing`: Type hints
-- `urllib.parse`: URL encoding
-
-## Testing Strategy (Future)
-
-### Unit Tests:
-- API response parsing
-- IV rank filtering logic
-- Spread calculation accuracy
-- Delta matching algorithm
-
-### Integration Tests:
-- End-to-end screening workflow
-- API error handling
-- CSV export validation
-
-### Mocking:
-- Tastytrade API responses
-- File system operations
-- Time-dependent logic
-
-## Security Considerations
-
-- **Credentials**: Stored in `.env` (not version controlled)
-- **Session Tokens**: Memory-only, printed for debugging (consider removing in production)
-- **API Keys**: No hardcoded secrets in codebase
-- **Input Validation**: URL encoding, parameter sanitization
-
-## Logging (Future Enhancement)
-
-Proposed logging levels:
-- **DEBUG**: API request/response details
-- **INFO**: Stage completion, counts
-- **WARNING**: Fallbacks activated, missing data
-- **ERROR**: API failures, parsing errors
-- **CRITICAL**: Authentication failures, fatal errors
+- add more tests around backfill and reconciliation edge cases
+- support partial closes and more complex roll scenarios
+- optionally add explicit backfill modes for already-populated actual rows
+- continue building analytics datasets now that realized exits are more trustworthy
 
 ---
 
-**Last Updated**: March 30, 2026  
-**Version**: 2.1
+**Last Updated**: April 17, 2026  
+**Version**: 2.2

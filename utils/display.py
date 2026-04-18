@@ -2,12 +2,11 @@
 Display utilities for terminal output
 """
 
-from tabulate import tabulate
-from typing import List, Dict
 import pandas as pd
+from tabulate import tabulate
 
 
-def display_opportunities(opportunities: List[Dict]):
+def display_opportunities(opportunities: list[dict]):
     """
     Display trade opportunities in a formatted table
     """
@@ -82,7 +81,7 @@ def display_opportunities(opportunities: List[Dict]):
     print(f"{'=' * 100}\n")
 
 
-def display_trade_details(opportunity: Dict):
+def display_trade_details(opportunity: dict):
     """
     Display detailed information for a single trade opportunity
     """

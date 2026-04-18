@@ -14,9 +14,9 @@ from __future__ import annotations
 
 import csv
 from collections import Counter, defaultdict
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Optional
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 CANDIDATES_PATH = PROJECT_ROOT / "opportunities" / "opportunity_candidates.csv"
@@ -24,6 +24,7 @@ CANDIDATES_PATH = PROJECT_ROOT / "opportunities" / "opportunity_candidates.csv"
 EXPECTED_CANDIDATE_COLUMNS = [
     "run_id",
     "snapshot_ts",
+    "strategy_version",
     "symbol",
     "expiration_date",
     "dte",
@@ -31,6 +32,12 @@ EXPECTED_CANDIDATE_COLUMNS = [
     "short_strike",
     "long_strike",
     "width",
+    "credit_mid",
+    "credit_natural",
+    "credit_expected",
+    "fill_quality",
+    "avg_width_pct",
+    "mid_weight",
     "premium",
     "premium_per_width",
     "max_profit",
@@ -51,7 +58,13 @@ EXPECTED_CANDIDATE_COLUMNS = [
 
 ALLOWED_CANDIDATE_STATUS = {"selected", "rejected"}
 ALLOWED_SELECTED_VALUES = {"true", "false"}
-VALID_ECONOMICS_EXPECTED_REASONS = {"selected_ranked_out", ""}
+VALID_ECONOMICS_EXPECTED_REASONS = {
+    "",
+    "selected_ranked_out",
+    "risk_reward",
+    "credit_natural_too_low",
+    "credit_expected_too_low",
+}
 
 
 @dataclass(frozen=True)
@@ -61,7 +74,7 @@ class AuditIssue:
     category: str
     severity: str
     message: str
-    row_number: Optional[int] = None
+    row_number: int | None = None
 
 
 def load_csv_rows(path: Path) -> tuple[list[str], list[dict[str, str]]]:
@@ -71,7 +84,7 @@ def load_csv_rows(path: Path) -> tuple[list[str], list[dict[str, str]]]:
         return reader.fieldnames or [], list(reader)
 
 
-def parse_float(value: str) -> Optional[float]:
+def parse_float(value: str) -> float | None:
     """Parse a string to float, returning None for blanks or invalid values."""
     raw = (value or "").strip()
     if raw == "":
@@ -82,7 +95,7 @@ def parse_float(value: str) -> Optional[float]:
         return None
 
 
-def parse_bool_text(value: str) -> Optional[bool]:
+def parse_bool_text(value: str) -> bool | None:
     """Parse a CSV boolean-like string into bool."""
     raw = (value or "").strip().lower()
     if raw == "true":
@@ -188,6 +201,12 @@ def audit_candidate_ranges(rows: list[dict[str, str]]) -> list[AuditIssue]:
         short_strike = parse_float(row.get("short_strike", ""))
         long_strike = parse_float(row.get("long_strike", ""))
         width = parse_float(row.get("width", ""))
+        credit_mid = parse_float(row.get("credit_mid", ""))
+        credit_natural = parse_float(row.get("credit_natural", ""))
+        credit_expected = parse_float(row.get("credit_expected", ""))
+        fill_quality = parse_float(row.get("fill_quality", ""))
+        avg_width_pct = parse_float(row.get("avg_width_pct", ""))
+        mid_weight = parse_float(row.get("mid_weight", ""))
         premium = parse_float(row.get("premium", ""))
         premium_per_width = parse_float(row.get("premium_per_width", ""))
         max_profit = parse_float(row.get("max_profit", ""))
@@ -251,19 +270,22 @@ def audit_candidate_ranges(rows: list[dict[str, str]]) -> list[AuditIssue]:
                 )
             )
 
-        if long_strike is not None and short_strike is not None:
-            if long_strike >= short_strike:
-                issues.append(
-                    AuditIssue(
-                        category="consistency",
-                        severity="error",
-                        row_number=index,
-                        message=(
-                            f"long_strike must be below short_strike for {symbol}: "
-                            f"{short_strike}/{long_strike}"
-                        ),
-                    )
+        if (
+            long_strike is not None
+            and short_strike is not None
+            and long_strike >= short_strike
+        ):
+            issues.append(
+                AuditIssue(
+                    category="consistency",
+                    severity="error",
+                    row_number=index,
+                    message=(
+                        f"long_strike must be below short_strike for {symbol}: "
+                        f"{short_strike}/{long_strike}"
+                    ),
                 )
+            )
 
         if width is not None and short_strike is not None and long_strike is not None:
             expected_width = round(short_strike - long_strike, 4)
@@ -279,6 +301,75 @@ def audit_candidate_ranges(rows: list[dict[str, str]]) -> list[AuditIssue]:
                         ),
                     )
                 )
+
+        if avg_width_pct is not None and avg_width_pct < 0:
+            issues.append(
+                AuditIssue(
+                    category="ranges",
+                    severity="warning",
+                    row_number=index,
+                    message=(
+                        f"avg_width_pct cannot be negative for {symbol}: "
+                        f"{avg_width_pct}"
+                    ),
+                )
+            )
+
+        if mid_weight is not None and not 0 <= mid_weight <= 1:
+            issues.append(
+                AuditIssue(
+                    category="ranges",
+                    severity="warning",
+                    row_number=index,
+                    message=(f"mid_weight outside [0, 1] for {symbol}: {mid_weight}"),
+                )
+            )
+
+        if fill_quality is not None and fill_quality < 0:
+            issues.append(
+                AuditIssue(
+                    category="ranges",
+                    severity="warning",
+                    row_number=index,
+                    message=(
+                        f"fill_quality cannot be negative for {symbol}: {fill_quality}"
+                    ),
+                )
+            )
+
+        if (
+            credit_natural is not None
+            and credit_expected is not None
+            and credit_expected < credit_natural
+        ):
+            issues.append(
+                AuditIssue(
+                    category="consistency",
+                    severity="warning",
+                    row_number=index,
+                    message=(
+                        f"credit_expected is below credit_natural for {symbol}: "
+                        f"expected={credit_expected}, natural={credit_natural}"
+                    ),
+                )
+            )
+
+        if (
+            credit_mid is not None
+            and credit_expected is not None
+            and credit_expected > credit_mid
+        ):
+            issues.append(
+                AuditIssue(
+                    category="consistency",
+                    severity="warning",
+                    row_number=index,
+                    message=(
+                        f"credit_expected is above credit_mid for {symbol}: "
+                        f"expected={credit_expected}, mid={credit_mid}"
+                    ),
+                )
+            )
 
         if short_delta is not None and not 0 <= short_delta <= 1:
             issues.append(
@@ -357,19 +448,23 @@ def audit_candidate_ranges(rows: list[dict[str, str]]) -> list[AuditIssue]:
                 )
             )
 
-        if economics_should_be_valid and premium is not None and max_profit is not None:
-            if round(premium, 4) != round(max_profit, 4):
-                issues.append(
-                    AuditIssue(
-                        category="consistency",
-                        severity="warning",
-                        row_number=index,
-                        message=(
-                            f"premium and max_profit differ for {symbol}: "
-                            f"premium={premium}, max_profit={max_profit}"
-                        ),
-                    )
+        if (
+            economics_should_be_valid
+            and premium is not None
+            and max_profit is not None
+            and round(premium, 4) != round(max_profit, 4)
+        ):
+            issues.append(
+                AuditIssue(
+                    category="consistency",
+                    severity="warning",
+                    row_number=index,
+                    message=(
+                        f"premium and max_profit differ for {symbol}: "
+                        f"premium={premium}, max_profit={max_profit}"
+                    ),
                 )
+            )
 
         if candidate_status not in ALLOWED_CANDIDATE_STATUS:
             issues.append(
