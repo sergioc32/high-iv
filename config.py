@@ -3,7 +3,7 @@ Configuration file for options screener
 """
 
 # Screening criteria
-IV_RANK_THRESHOLD = 45  # Minimum IV Rank %
+IV_RANK_THRESHOLD = 40  # Minimum IV Rank %
 MIN_STOCK_PRICE = (
     25.00  # Minimum stock price ($25+ filters penny stocks and sub-$25 junk)
 )
@@ -24,7 +24,7 @@ LONG_PUT_DELTA = 0.10  # Delta for long put (protection)
 # Skew optimization
 SKEW_WINDOW_OTM = 3  # Check N OTM (lower-delta/lower-strike) shifts from anchor
 SKEW_WINDOW_ITM = 1  # Check N ITM (higher-delta/higher-strike) shifts from anchor
-MIN_SCORE_IMPROVEMENT_PCT = 5  # Require 5% higher skew score to switch from anchor
+MIN_SCORE_IMPROVEMENT_PCT = 2.5  # Require 5% higher skew score to switch from anchor
 
 # Liquidity and fillability checks
 MIN_CREDIT_PER_WIDTH = (
@@ -46,7 +46,7 @@ MAX_SHORT_LEG_BID_ASK_WIDTH = (
     1.25  # Max absolute spread on short leg whitelist=1.50 max, general=1.25 max
 )
 MAX_SHORT_LEG_BID_ASK_WIDTH_PCT = (
-    0.30  # OR max 30% of mid price on short leg whitelist=30%, general=30%
+    0.25  # OR max 30% of mid price on short leg whitelist=30%, general=30%
 )
 MAX_LONG_LEG_BID_ASK_WIDTH = 3.00  # Max absolute spread on long leg (looser) whitelist=5.00 max, general=3.00 max
 MAX_LONG_LEG_BID_ASK_WIDTH_PCT = (

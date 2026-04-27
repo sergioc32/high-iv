@@ -6,6 +6,19 @@ import pandas as pd
 from tabulate import tabulate
 
 
+def _round_numeric_column(
+    df: pd.DataFrame, column_name: str, decimals: int, *, percent: bool = False
+) -> None:
+    """Round optional numeric columns safely for display."""
+    if column_name not in df.columns:
+        return
+
+    series = pd.to_numeric(df[column_name], errors="coerce")
+    if percent:
+        series = series * 100
+    df[column_name] = series.round(decimals).fillna("")
+
+
 def display_opportunities(opportunities: list[dict]):
     """
     Display trade opportunities in a formatted table
@@ -23,15 +36,19 @@ def display_opportunities(opportunities: list[dict]):
         "stock_price",
         "short_strike",
         "long_strike",
-        "width",
         "premium",
         "max_loss",
         "risk_reward_ratio",
-        "ev_score_chosen",
         "strategy_alignment_score",
-        "dte",
-        "earnings_within_dte",
+        "credit_expected",
+        "mid_capture_pct",
+        "fill_quality_score",
+        "distance_to_52w_high_pct",
+        "range_position_52w",
         "skew_ratio",
+        "ev_score_chosen",
+        "earnings_within_dte",
+        "dte",
     ]
 
     # Only keep columns that actually exist in the data
@@ -44,8 +61,12 @@ def display_opportunities(opportunities: list[dict]):
         "stock_price": "Stock $",
         "short_strike": "Short Strike",
         "long_strike": "Long Strike",
-        "width": "Width",
         "premium": "Premium",
+        "credit_expected": "Exp Credit",
+        "mid_capture_pct": "Fill %",
+        "fill_quality_score": "Fill Score",
+        "distance_to_52w_high_pct": "To 52W Hi %",
+        "range_position_52w": "52W Pos %",
         "max_loss": "Max Loss",
         "risk_reward_ratio": "R/R Ratio",
         "ev_score_chosen": "EV Score",
@@ -57,22 +78,20 @@ def display_opportunities(opportunities: list[dict]):
     df.columns = [col_labels[c] for c in display_cols]
 
     # Round numeric columns
-    df["Stock $"] = df["Stock $"].round(2)
-    df["Premium"] = df["Premium"].round(2)
-    df["Max Loss"] = df["Max Loss"].round(2)
-    df["R/R Ratio"] = df["R/R Ratio"].round(2)
-    if "EV Score" in df.columns:
-        df["EV Score"] = pd.to_numeric(df["EV Score"], errors="coerce").round(4)
-        df["EV Score"] = df["EV Score"].fillna("")
-    if "Align Score" in df.columns:
-        df["Align Score"] = pd.to_numeric(df["Align Score"], errors="coerce").round(1)
-        df["Align Score"] = df["Align Score"].fillna("")
-    if "IV Skew Ratio" in df.columns:
-        df["IV Skew Ratio"] = pd.to_numeric(df["IV Skew Ratio"], errors="coerce").round(
-            3
-        )
-        df["IV Skew Ratio"] = df["IV Skew Ratio"].fillna("")
-    df["Earnings"] = df["Earnings"].fillna("")
+    _round_numeric_column(df, "Stock $", 2)
+    _round_numeric_column(df, "Premium", 2)
+    _round_numeric_column(df, "Exp Credit", 2)
+    _round_numeric_column(df, "Fill %", 1, percent=True)
+    _round_numeric_column(df, "Fill Score", 2)
+    _round_numeric_column(df, "To 52W Hi %", 1, percent=True)
+    _round_numeric_column(df, "52W Pos %", 1, percent=True)
+    _round_numeric_column(df, "Max Loss", 2)
+    _round_numeric_column(df, "R/R Ratio", 2)
+    _round_numeric_column(df, "EV Score", 4)
+    _round_numeric_column(df, "Align Score", 1)
+    _round_numeric_column(df, "IV Skew Ratio", 3)
+    if "Earnings" in df.columns:
+        df["Earnings"] = df["Earnings"].fillna("")
 
     print(f"\n{'=' * 100}")
     print(f"Top {len(df)} Put Spread Opportunities")

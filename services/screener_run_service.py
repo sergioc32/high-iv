@@ -263,6 +263,12 @@ class ScreenerRunService:
                     metrics_data[symbol]["volume"] = quote.get("volume")
                 if quote.get("market_cap") is not None:
                     metrics_data[symbol]["market_cap"] = quote.get("market_cap")
+                if quote.get("year_high_price") is not None:
+                    metrics_data[symbol]["year_high_price"] = quote.get(
+                        "year_high_price"
+                    )
+                if quote.get("year_low_price") is not None:
+                    metrics_data[symbol]["year_low_price"] = quote.get("year_low_price")
                 metrics_data[symbol]["is_trading_halted"] = quote.get(
                     "is_trading_halted",
                     False,
@@ -335,6 +341,7 @@ class ScreenerRunService:
                     "target_exp": target_exp,
                     "chain": chain,
                     "put_symbols": put_symbols,
+                    "quote_context": quote,
                 }
                 all_put_symbols.extend(put_symbols)
 
@@ -410,6 +417,7 @@ class ScreenerRunService:
 
             try:
                 chain = data["chain"]
+                chain["underlying_quote"] = data.get("quote_context") or {}
                 for strike_data in chain["strikes"].values():
                     put_symbol = strike_data.get("put_symbol")
                     if put_symbol and put_symbol in all_option_quotes:

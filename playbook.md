@@ -1,6 +1,11 @@
 # High IV Phase 1 Playbook
 
-This playbook is the operational workflow for running the current system end-to-end before Phase 2.
+This playbook is the operator workflow for running the system day to day.
+
+It is written for the way the product is actually used now:
+- the terminal output is the primary interface
+- the CSV files are supporting records
+- the analytics layer is for weekly review and strategy improvement, not automatic trading
 
 ## Purpose
 Use this document as the day-to-day and week-to-week checklist for:
@@ -8,6 +13,7 @@ Use this document as the day-to-day and week-to-week checklist for:
 - Managing open positions
 - Closing trades based on alerts and risk rules
 - Producing weekly analytics for tuning decisions
+- Giving another user a clear operating routine even if they are not highly technical
 
 ## Daily Workflow
 
@@ -28,7 +34,7 @@ What this does:
 - Clears stale cache for a clean daily run
 - Syncs account positions into open-trade tracking
 - Prints open position monitoring section with alerts
-- Runs screener and prints TOP PUT SPREAD OPPORTUNITIES
+- Runs screener and prints `Top Put Spread Opportunities`
 - Writes daily opportunity CSV output
 
 Expected outputs:
@@ -38,8 +44,27 @@ Expected outputs:
 - Rejection counters updated in rejections/rejections_tracking.csv
 
 How to use it:
-- In SYNCING OPEN POSITIONS, close trades that meet your exit rules (for example target profit, time-based exit, or risk defense)
-- In TOP PUT SPREAD OPPORTUNITIES, open only trades you approve
+- In `SYNCING OPEN POSITIONS`, review alerts first. That section is for trade management.
+- In `Top Put Spread Opportunities`, review only the best current setups. That section is for potential new entries.
+- Use the terminal table as the main decision surface.
+- Open the CSV only if you need to inspect more rows or verify a detail not shown in the CLI.
+
+What the CLI opportunity table is meant to tell you:
+- `Premium`: the current expected premium captured by the spread
+- `Exp Credit`: the model's expected fill credit
+- `Fill %`: how much of the mid-to-natural range the expected fill is capturing
+- `Fill Score`: a compact execution-quality score
+- `To 52W Hi %`: how close the stock is to its 52-week high
+- `52W Pos %`: where the stock sits within its 52-week range
+- `EV Score`: the current economics/ranking signal
+- `Align Score`: the broader setup-alignment signal
+
+Practical reading guide:
+- Higher `Exp Credit`, `Fill %`, and `Fill Score` generally mean better expected execution
+- A very low `To 52W Hi %` means price is close to the 52-week high, which can matter for extension risk
+- A very high `52W Pos %` means the stock is trading near the top of its yearly range
+- `EV Score` and `Align Score` are helpful summaries, but they should not replace judgment
+- If a setup looks statistically good but price looks extended, slow down and review it carefully
 
 ### 2. Intraday Re-check (optional, can run multiple times)
 Checklist:
@@ -80,6 +105,52 @@ Expected outputs:
 How to use it:
 - Use this for quick position management checks during volatile sessions
 
+## Practical Operator Workflow
+
+If you are using the product the intended simple way, this is the routine:
+
+### Every trading morning
+1. Run:
+```bash
+python main.py --fresh-day
+```
+2. Read the open-position section first
+3. Read the opportunity table second
+4. Make manual trade decisions
+
+### During the day if needed
+1. Run:
+```bash
+python main.py
+```
+2. Compare the updated opportunity list to what you saw earlier
+3. Only act if the setup still makes sense after your manual review
+
+### If you only want to manage open trades
+1. Run:
+```bash
+python main.py --sync-positions
+```
+2. Ignore the screener and focus only on risk, exits, and current positions
+
+## When To Use CSV Files
+
+Most users should not need CSV files during normal daily use.
+
+Use CSV files only when:
+- you want more rows than the terminal shows
+- you want to compare runs from different times in the day
+- you want to inspect analytics or historical trade details
+- you want to debug why a trade did or did not appear
+
+The most important CSVs are:
+- `opportunities/opportunities_*.csv`: the saved opportunity snapshot for a run
+- `opportunities/opportunity_candidates.csv`: the detailed candidate log
+- `trades/trades_open.csv`: current open-trade tracking
+- `trades/trades_closed.csv`: closed-trade history
+- `analysis/analysis_dataset.csv`: joined reporting dataset
+- `ml/training_dataset.csv`: model-prep dataset, mainly for analytics and experimentation
+
 ## Weekly Workflow
 
 Run this after market close on Friday or over the weekend.
@@ -109,6 +180,7 @@ Expected outputs:
 How to use it:
 - Treat this as your default weekly command
 - Use the manual steps below only when you want finer control
+- This is the best way to review what worked, what failed, and what may need tuning
 
 ### 1. Build fresh analysis dataset
 Checklist:
@@ -166,6 +238,37 @@ How to use it:
 - Use weekly_report markdown for decision review (performance, execution alignment, ranking backtest, sensitivity, recommendations)
 - Apply changes only through manual approval
 
+## Analytics And ML Workflow
+
+The analytics and ML files are decision-support tools.
+They are not part of the required daily trading loop.
+
+### What they are for
+- reviewing rejected trades
+- reviewing successful and unsuccessful trades
+- checking data quality
+- preparing for future model work
+
+### What they are not for
+- automatic trade execution
+- automatic strategy changes
+- full supervised learning right now
+
+Current state:
+- the data foundation is useful
+- the analytics are useful right now
+- the training dataset is not yet large enough for serious model training
+
+Use the ML split fields like this:
+- `train`: oldest data, used to explore ideas and draft scoring changes
+- `validation`: middle data, used to see if the idea still holds on newer trades
+- `test`: newest data, used as the final untouched check
+
+Important:
+- Do not tune ideas on `test`
+- Use `test` last
+- Right now the split is best used for disciplined analysis, not full model training
+
 ## Decision Rules (Operating Discipline)
 
 Daily:
@@ -206,3 +309,26 @@ To keep Phase 1 reliable before moving on:
 - [ ] Keep trades_closed.csv current as trades are exited
 - [ ] Produce one weekly report package every week
 - [ ] Make only manually approved strategy changes
+
+## Operator Summary
+
+If you only remember one workflow, use this:
+
+### Daily
+```bash
+python main.py --fresh-day
+```
+
+### Weekly
+```bash
+python analysis/run_weekly_closeout.py
+```
+
+### Optional ML / training audit
+```bash
+python ml/build_training_dataset.py
+python ml/training_data_audit.py
+```
+
+The first two commands are the real operating loop.
+The ML commands are for strategy review and future model preparation.

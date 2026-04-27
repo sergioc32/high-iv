@@ -29,6 +29,11 @@ Candidate-level, entry-time dataset. One row per evaluated spread candidate.
 - expiration_date: string, required, YYYY-MM-DD
 - dte: integer, required, days
 - stock_price: float, required, USD
+- year_high_price: float, optional, USD, current 52-week high from equity market snapshot
+- year_low_price: float, optional, USD, current 52-week low from equity market snapshot
+- range_position_52w: float, optional, unitless, stock position within the 52-week range in [0, 1]
+- distance_to_52w_high_pct: float, optional, unitless, pct distance from stock_price to year_high_price
+- distance_to_52w_low_pct: float, optional, unitless, pct distance from year_low_price to stock_price
 - short_strike: float, required, USD
 - long_strike: float, optional, USD
 - width: float, optional, USD
@@ -36,6 +41,10 @@ Candidate-level, entry-time dataset. One row per evaluated spread candidate.
 - credit_natural: float, optional, USD per contract, worst-case fill estimate
 - credit_expected: float, optional, USD per contract, modeled fill between natural and mid
 - fill_quality: float, optional, unitless, credit_expected / credit_mid when credit_mid > 0
+- fill_edge: float, optional, USD per contract, credit_expected - credit_natural
+- fill_edge_pct: float, optional, unitless, fill_edge / abs(credit_expected)
+- mid_capture_pct: float, optional, unitless, share of available natural-to-mid edge captured by credit_expected
+- fill_quality_score: float, optional, unitless, blended execution-quality heuristic from fill_quality, mid_capture_pct, and width quality
 - avg_width_pct: float, optional, unitless, average of short/long bid-ask width as pct of mid
 - mid_weight: float, optional, unitless, dynamic midpoint weight used in credit_expected
 - premium: float, optional, USD per contract
@@ -50,6 +59,11 @@ Candidate-level, entry-time dataset. One row per evaluated spread candidate.
 - skew_ratio: float, optional, short_iv / atm_iv
 - skew_diff: float, optional, short_iv - atm_iv
 - earnings_within_dte: string, optional, YYYY-MM-DD or blank
+- anchor_vs_shift_status: string, optional, {anchor, shifted}
+- shift_steps_from_anchor: integer, optional, negative = more OTM, positive = more ITM, zero = anchor
+- short_strike_shift: float, optional, USD shift from the anchor short strike
+- long_strike_shift: float, optional, USD shift from the anchor long strike
+- shift_direction: string, optional, {otm, anchor, itm}
 - candidate_status: enum, required, {selected, rejected}
 - selected: boolean, required
 - rejection_reason_primary: string, optional
@@ -84,12 +98,21 @@ Use one candidate row as five blocks:
 - stock_price
 - dte
 - earnings_within_dte
+- year_high_price
+- year_low_price
+- range_position_52w
+- distance_to_52w_high_pct
+- distance_to_52w_low_pct
 
 3. Trade economics: what does the spread pay and risk?
 - credit_mid: midpoint-based credit estimate
 - credit_natural: worst-case fill estimate
 - credit_expected: modeled credit used for economics and ranking
 - fill_quality: expected credit as a fraction of midpoint credit
+- fill_edge: absolute execution headroom above natural credit
+- fill_edge_pct: execution headroom normalized by expected credit
+- mid_capture_pct: how much of the natural-to-mid edge the expected fill captures
+- fill_quality_score: blended execution-quality heuristic for analytics and future ranking work
 - avg_width_pct: combined market width quality signal used in fill modeling
 - mid_weight: midpoint weight used to build expected credit
 - premium: credit received per contract in USD
@@ -105,7 +128,14 @@ Use one candidate row as five blocks:
 - skew_diff: short_iv - atm_iv
 - ev_score: current ranking score, computed as (premium / max_loss) * (1 - short_delta)
 
-5. Decision trail: what happened to this candidate?
+5. Structure and shift context: how was this candidate generated?
+- anchor_vs_shift_status
+- shift_steps_from_anchor
+- short_strike_shift
+- long_strike_shift
+- shift_direction
+
+6. Decision trail: what happened to this candidate?
 - candidate_status
 - selected
 - rejection_reason_primary
@@ -144,7 +174,66 @@ Normalized analytics table joining candidate rows with trade lifecycle fields.
 - Match metadata: match_status, trade_status
 - Trade linkage: trade_id, entry_date
 - Open tracking: buying_power_used, current_mark, current_pnl, current_pnl_pct, dte_remaining, days_held, short_strike_breached, exit_signal
-- Closed outcomes: close_date, close_debit, fees_estimated, dte_at_close, profit_loss, profit_loss_pct, profit_pct_of_max, annualized_return, is_estimated_exit, exit_type, exit_notes
+- Closed outcomes: close_date, close_debit, close_debit_estimated, close_debit_actual, actual_exit_found, exit_price_source, close_fill_timestamp, close_order_id, match_confidence, fees_estimated, dte_at_close, profit_loss, profit_loss_pct, profit_pct_of_max, annualized_return, is_estimated_exit, exit_type, exit_notes
+
+---
+
+## Dataset: analysis/rejected_candidate_dataset.csv
+
+### Description
+Dense rejected-candidate analytics table derived from `opportunities/opportunity_candidates.csv`.
+
+### Purpose
+- analyze rejection behavior without trade/outcome sparsity
+- compare rejected candidates to selected sibling candidates
+- support filter tuning and near-miss review
+
+### Row grain
+- one row per rejected candidate
+
+### Source policy
+- base candidate columns come from `opportunities/opportunity_candidates.csv`
+- derived fields are added for tuning analysis only
+
+### Derived fields
+- `rejection_bucket`
+- `delta_distance_from_target`
+- `moneyness_pct`
+- `premium_pct_of_width`
+- `width_pct_of_stock`
+- `sibling_selected_exists`
+- `same_group_candidate_count`
+- `same_group_liquidity_failure_count`
+- `same_group_ranked_out_exists`
+
+---
+
+## Dataset: analysis/executed_trade_dataset.csv
+
+### Description
+Dense executed-trade table derived from the reconciled reporting dataset plus candidate-log enrichment.
+
+### Purpose
+- analyze successful vs unsuccessful trades with one row per trade
+- support future training-dataset construction
+- separate trade analysis from the sparse mixed reporting table
+
+### Row grain
+- one row per unique executed trade
+
+### Source policy
+- trade linkage and outcome fields come from `analysis/analysis_dataset.csv`
+- candidate-only enrichment fields not present in the reporting dataset may be backfilled from `opportunities/opportunity_candidates.csv`
+
+### Additional metadata
+- `entry_match_quality`
+- `label_quality_weight`
+
+### Label quality guidance
+- `1.0` for exact match with actual exit
+- `0.8` for adjusted match with actual exit
+- `0.5` for exact/adjusted match with estimated exit
+- `0.3` for trade-only
 
 ---
 

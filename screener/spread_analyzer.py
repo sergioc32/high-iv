@@ -38,6 +38,7 @@ class _CandidateEvaluator:
         symbol: str,
         chain: dict[str, Any],
         stock_price: float,
+        anchor_strike: float,
         expiration_info: dict[str, Any] | None,
         earnings_within_dte: str,
         rejections: RejectionCounters,
@@ -46,6 +47,7 @@ class _CandidateEvaluator:
         self.symbol = symbol
         self.chain = chain
         self.stock_price = stock_price
+        self.anchor_strike = anchor_strike
         self.expiration_info = expiration_info
         self.earnings_within_dte = earnings_within_dte
         self.rejections = rejections
@@ -268,6 +270,8 @@ class _CandidateEvaluator:
             fill_quality=fill_quality,
             avg_width_pct=avg_width_pct,
             mid_weight=mid_weight,
+            anchor_short_strike=self.anchor_strike,
+            shift_steps_from_anchor=candidate.shift_steps,
         )
 
 
@@ -368,6 +372,103 @@ class SpreadAnalyzer:
     def _is_delta_above_max(self, short_delta: float | None) -> bool:
         return short_delta is not None and short_delta > self.max_delta
 
+    @staticmethod
+    def _extract_underlying_quote(chain: dict[str, Any]) -> dict[str, Any]:
+        quote = chain.get("underlying_quote")
+        return quote if isinstance(quote, dict) else {}
+
+    @staticmethod
+    def _compute_range_position_52w(
+        stock_price: float | None,
+        year_low_price: float | None,
+        year_high_price: float | None,
+    ) -> float | None:
+        if (
+            stock_price is None
+            or year_low_price is None
+            or year_high_price is None
+            or year_high_price <= year_low_price
+        ):
+            return None
+        raw_position = (stock_price - year_low_price) / (
+            year_high_price - year_low_price
+        )
+        return max(0.0, min(raw_position, 1.0))
+
+    @staticmethod
+    def _compute_fill_analytics(
+        *,
+        credit_mid: float | None,
+        credit_natural: float | None,
+        credit_expected: float | None,
+        fill_quality: float | None,
+        avg_width_pct: float | None,
+    ) -> tuple[float | None, float | None, float | None, float | None]:
+        if credit_expected is None or credit_natural is None:
+            return None, None, None, None
+
+        fill_edge = credit_expected - credit_natural
+        fill_edge_pct = (
+            fill_edge / abs(credit_expected)
+            if credit_expected not in (None, 0)
+            else None
+        )
+
+        mid_capture_pct = None
+        if credit_mid is not None:
+            capture_room = credit_mid - credit_natural
+            if capture_room > 0:
+                raw_capture = fill_edge / capture_room
+                mid_capture_pct = max(0.0, min(raw_capture, 1.0))
+
+        width_quality = None
+        if avg_width_pct is not None and avg_width_pct >= 0:
+            width_quality = 1.0 / (1.0 + avg_width_pct)
+
+        quality_parts = [
+            value
+            for value in (fill_quality, mid_capture_pct, width_quality)
+            if value is not None
+        ]
+        fill_quality_score = (
+            sum(quality_parts) / len(quality_parts) if quality_parts else None
+        )
+        return fill_edge, fill_edge_pct, mid_capture_pct, fill_quality_score
+
+    @staticmethod
+    def _compute_shift_context(
+        *,
+        short_strike: float | None,
+        long_strike: float | None,
+        width: float | None,
+        anchor_short_strike: float | None,
+        shift_steps_from_anchor: int | None,
+    ) -> tuple[str, float | None, float | None, str]:
+        if shift_steps_from_anchor is None:
+            return "", None, None, ""
+
+        anchor_vs_shift_status = "anchor" if shift_steps_from_anchor == 0 else "shifted"
+        if shift_steps_from_anchor < 0:
+            shift_direction = "otm"
+        elif shift_steps_from_anchor > 0:
+            shift_direction = "itm"
+        else:
+            shift_direction = "anchor"
+
+        short_shift = None
+        long_shift = None
+        if short_strike is not None and anchor_short_strike is not None:
+            short_shift = short_strike - anchor_short_strike
+        if (
+            long_strike is not None
+            and width is not None
+            and anchor_short_strike is not None
+        ):
+            anchor_long_strike = anchor_short_strike - width
+            long_shift = long_strike - anchor_long_strike
+
+        return anchor_vs_shift_status, short_shift, long_shift, shift_direction
+
     def _find_anchor_strike(self, chain: dict[str, Any]) -> float | None:
         return self.find_strike_by_delta(chain, self.target_delta)
 
@@ -432,6 +533,8 @@ class SpreadAnalyzer:
                     selected=False,
                     rejection_reason_primary=RejectionReason.LONG_STRIKE_UNAVAILABLE.value,
                     rejection_reason_flags=RejectionReason.LONG_STRIKE_UNAVAILABLE.value,
+                    anchor_short_strike=available_strikes[anchor_index],
+                    shift_steps_from_anchor=shift_steps,
                 )
                 continue
 
@@ -513,6 +616,8 @@ class SpreadAnalyzer:
         fill_quality: float | None = None,
         avg_width_pct: float | None = None,
         mid_weight: float | None = None,
+        anchor_short_strike: float | None = None,
+        shift_steps_from_anchor: int | None = None,
     ) -> None:
         skew_metrics = (
             compute_skew_metrics(chain, stock_price, short_strike)
@@ -534,6 +639,44 @@ class SpreadAnalyzer:
         if computed_ev_score is None:
             computed_ev_score = compute_ev_score(premium, max_loss, short_delta)
 
+        underlying_quote = self._extract_underlying_quote(chain)
+        year_high_price = to_float(underlying_quote.get("year_high_price"))
+        year_low_price = to_float(underlying_quote.get("year_low_price"))
+        range_position_52w = self._compute_range_position_52w(
+            stock_price, year_low_price, year_high_price
+        )
+        distance_to_52w_high_pct = (
+            max(year_high_price - stock_price, 0.0) / year_high_price
+            if year_high_price is not None and year_high_price > 0
+            else None
+        )
+        distance_to_52w_low_pct = (
+            max(stock_price - year_low_price, 0.0) / year_low_price
+            if year_low_price is not None and year_low_price > 0
+            else None
+        )
+        fill_edge, fill_edge_pct, mid_capture_pct, fill_quality_score = (
+            self._compute_fill_analytics(
+                credit_mid=credit_mid,
+                credit_natural=credit_natural,
+                credit_expected=credit_expected,
+                fill_quality=fill_quality,
+                avg_width_pct=avg_width_pct,
+            )
+        )
+        (
+            anchor_vs_shift_status,
+            short_strike_shift,
+            long_strike_shift,
+            shift_direction,
+        ) = self._compute_shift_context(
+            short_strike=short_strike,
+            long_strike=long_strike,
+            width=width,
+            anchor_short_strike=anchor_short_strike,
+            shift_steps_from_anchor=shift_steps_from_anchor,
+        )
+
         row = {
             "run_id": self.run_id,
             "snapshot_ts": self.snapshot_ts,
@@ -546,6 +689,21 @@ class SpreadAnalyzer:
             if expiration_info
             else None,
             "stock_price": round(stock_price, 4) if stock_price is not None else None,
+            "year_high_price": round(year_high_price, 4)
+            if year_high_price is not None
+            else None,
+            "year_low_price": round(year_low_price, 4)
+            if year_low_price is not None
+            else None,
+            "range_position_52w": round(range_position_52w, 4)
+            if range_position_52w is not None
+            else None,
+            "distance_to_52w_high_pct": round(distance_to_52w_high_pct, 4)
+            if distance_to_52w_high_pct is not None
+            else None,
+            "distance_to_52w_low_pct": round(distance_to_52w_low_pct, 4)
+            if distance_to_52w_low_pct is not None
+            else None,
             "short_strike": short_strike,
             "long_strike": long_strike,
             "width": width,
@@ -558,6 +716,16 @@ class SpreadAnalyzer:
             else None,
             "fill_quality": round(fill_quality, 4)
             if fill_quality is not None
+            else None,
+            "fill_edge": round(fill_edge, 2) if fill_edge is not None else None,
+            "fill_edge_pct": round(fill_edge_pct, 4)
+            if fill_edge_pct is not None
+            else None,
+            "mid_capture_pct": round(mid_capture_pct, 4)
+            if mid_capture_pct is not None
+            else None,
+            "fill_quality_score": round(fill_quality_score, 4)
+            if fill_quality_score is not None
             else None,
             "avg_width_pct": round(avg_width_pct, 4)
             if avg_width_pct is not None
@@ -579,6 +747,15 @@ class SpreadAnalyzer:
             "skew_ratio": skew_metrics.get("skew_ratio"),
             "skew_diff": skew_metrics.get("skew_diff"),
             "earnings_within_dte": earnings_within_dte,
+            "anchor_vs_shift_status": anchor_vs_shift_status,
+            "shift_steps_from_anchor": shift_steps_from_anchor,
+            "short_strike_shift": round(short_strike_shift, 4)
+            if short_strike_shift is not None
+            else None,
+            "long_strike_shift": round(long_strike_shift, 4)
+            if long_strike_shift is not None
+            else None,
+            "shift_direction": shift_direction,
             "candidate_status": candidate_status,
             "selected": selected,
             "rejection_reason_primary": rejection_reason_primary,
@@ -714,6 +891,8 @@ class SpreadAnalyzer:
                 selected=False,
                 rejection_reason_primary=RejectionReason.NO_LONG_STRIKE.value,
                 rejection_reason_flags=RejectionReason.NO_LONG_STRIKE.value,
+                anchor_short_strike=anchor_strike,
+                shift_steps_from_anchor=0,
             )
             return None
 
@@ -735,6 +914,7 @@ class SpreadAnalyzer:
             symbol=symbol,
             chain=chain,
             stock_price=stock_price,
+            anchor_strike=anchor_strike,
             expiration_info=expiration_info,
             earnings_within_dte=earnings_within_dte,
             rejections=rejections,
@@ -799,6 +979,8 @@ class SpreadAnalyzer:
                 fill_quality=candidate.credit_components.fill_quality,
                 avg_width_pct=candidate.credit_components.avg_width_pct,
                 mid_weight=candidate.credit_components.mid_weight,
+                anchor_short_strike=selection.anchor_strike,
+                shift_steps_from_anchor=candidate.shift_steps,
             )
 
         return {
@@ -905,6 +1087,33 @@ class SpreadAnalyzer:
         skew_metrics = compute_skew_metrics(
             chain, stock_price, spread_strikes["short_strike"]
         )
+        underlying_quote = self._extract_underlying_quote(chain)
+        year_high_price = to_float(underlying_quote.get("year_high_price"))
+        year_low_price = to_float(underlying_quote.get("year_low_price"))
+        range_position_52w = self._compute_range_position_52w(
+            stock_price=stock_price,
+            year_low_price=year_low_price,
+            year_high_price=year_high_price,
+        )
+        distance_to_52w_high_pct = (
+            (year_high_price - stock_price) / year_high_price
+            if stock_price is not None and year_high_price not in (None, 0)
+            else None
+        )
+        distance_to_52w_low_pct = (
+            (stock_price - year_low_price) / stock_price
+            if stock_price not in (None, 0) and year_low_price is not None
+            else None
+        )
+        fill_edge, fill_edge_pct, mid_capture_pct, fill_quality_score = (
+            self._compute_fill_analytics(
+                credit_mid=metrics.get("credit_mid"),
+                credit_natural=metrics.get("credit_natural"),
+                credit_expected=metrics.get("credit_expected"),
+                fill_quality=metrics.get("fill_quality"),
+                avg_width_pct=metrics.get("avg_width_pct"),
+            )
+        )
         opportunity = {
             "symbol": symbol,
             "stock_price": stock_price,
@@ -922,6 +1131,31 @@ class SpreadAnalyzer:
             "ev_score_anchor": spread_strikes.get("ev_score_anchor"),
             "ev_score_chosen": spread_strikes.get("ev_score_chosen"),
             "earnings_within_dte": earnings_within_dte,
+            "year_high_price": round(year_high_price, 4)
+            if year_high_price is not None
+            else None,
+            "year_low_price": round(year_low_price, 4)
+            if year_low_price is not None
+            else None,
+            "range_position_52w": round(range_position_52w, 4)
+            if range_position_52w is not None
+            else None,
+            "distance_to_52w_high_pct": round(distance_to_52w_high_pct, 4)
+            if distance_to_52w_high_pct is not None
+            else None,
+            "distance_to_52w_low_pct": round(distance_to_52w_low_pct, 4)
+            if distance_to_52w_low_pct is not None
+            else None,
+            "fill_edge": round(fill_edge, 2) if fill_edge is not None else None,
+            "fill_edge_pct": round(fill_edge_pct, 4)
+            if fill_edge_pct is not None
+            else None,
+            "mid_capture_pct": round(mid_capture_pct, 4)
+            if mid_capture_pct is not None
+            else None,
+            "fill_quality_score": round(fill_quality_score, 4)
+            if fill_quality_score is not None
+            else None,
             **metrics,
             **skew_metrics,
         }
@@ -947,6 +1181,8 @@ class SpreadAnalyzer:
             fill_quality=metrics.get("fill_quality"),
             avg_width_pct=metrics.get("avg_width_pct"),
             mid_weight=metrics.get("mid_weight"),
+            anchor_short_strike=spread_strikes.get("anchor_strike"),
+            shift_steps_from_anchor=spread_strikes.get("skew_steps_from_anchor"),
         )
         return opportunity
 

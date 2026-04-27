@@ -41,6 +41,17 @@ REASON_BUCKETS: dict[str, str] = {
     "selected_ranked_out": "selection",
 }
 
+LEGACY_REASON_ALIASES: dict[str, str] = {
+    "credit_conservative": "credit_expected_too_low",
+    "delta_bounds": "delta_bounds_max",
+}
+
+
+def normalize_rejection_reason(reason: str) -> str:
+    """Normalize legacy reason labels to the current analytics taxonomy."""
+    raw = (reason or "").strip()
+    return LEGACY_REASON_ALIASES.get(raw, raw)
+
 
 def load_csv_rows(path: Path) -> tuple[list[str], list[dict[str, str]]]:
     """Load a CSV file and return (header, rows)."""
@@ -106,7 +117,8 @@ def rollup_reason_totals(reason_totals: Counter[str]) -> Counter[str]:
     """Aggregate detailed reasons into broader diagnostic buckets."""
     bucket_totals: Counter[str] = Counter()
     for reason, count in reason_totals.items():
-        bucket = REASON_BUCKETS.get(reason, "other")
+        normalized_reason = normalize_rejection_reason(reason)
+        bucket = REASON_BUCKETS.get(normalized_reason, "other")
         bucket_totals[bucket] += count
     return bucket_totals
 
@@ -168,7 +180,8 @@ def summarize_symbol_level(
                 symbols_with_rejections.add(symbol)
 
         for col in counter_columns:
-            reason_totals[col] += as_int(row.get(col, "0"))
+            normalized_reason = normalize_rejection_reason(col)
+            reason_totals[normalized_reason] += as_int(row.get(col, "0"))
 
     return {
         "rows": len(rows),
@@ -194,7 +207,8 @@ def summarize_candidate_level(rows: list[dict[str, str]], top_n: int) -> dict:
 
     for row in rejected_rows:
         symbol = (row.get("symbol") or "").strip()
-        reason = (row.get("rejection_reason_primary") or "").strip() or "(blank)"
+        reason = normalize_rejection_reason(row.get("rejection_reason_primary") or "")
+        reason = reason or "(blank)"
         reason_counter[reason] += 1
         if symbol:
             symbol_rejected_counter[symbol] += 1

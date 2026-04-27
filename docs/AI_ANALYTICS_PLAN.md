@@ -57,6 +57,32 @@ Phase 1 is complete as of 2026-04-05. Remaining optional schema enhancements are
 - `opportunity_candidates.csv` header auto-migrates if a new column is added; old files continue to load cleanly.
 - Analysis reconciliation now supports `exact_match`, `adjusted_match`, `missing_match`, and `trade_only`.
 - Weekly reporting includes execution-alignment diagnostics (exact vs shifted vs trade-only), shift direction (OTM/ITM), and daily opportunities-list presence metrics.
+- Next candidate-instrumentation priority is to add market-context, fill-quality, and structural-context fields so analytics can evaluate setup quality more holistically before those signals are promoted into live ranking or hard filters.
+- Immediate market-context priority fields should use currently available equity snapshot data:
+  - `year_high_price`
+  - `year_low_price`
+  - `range_position_52w`
+  - `distance_to_52w_high_pct`
+  - `distance_to_52w_low_pct`
+- Immediate fill/execution quality priority fields should use already available spread economics:
+  - `fill_edge`
+  - `fill_edge_pct`
+  - `mid_capture_pct`
+  - `fill_quality_score`
+- Immediate structural-context priority fields should capture how the candidate was produced and selected:
+  - `anchor_vs_shift_status`
+  - `shift_steps_from_anchor`
+  - `short_strike_shift`
+  - `long_strike_shift`
+  - `shift_direction`
+- Deferred until historical price bars are available:
+  - `return_20d`
+  - `return_40d`
+  - `return_60d`
+  - `price_vs_20dma_pct`
+  - `price_vs_50dma_pct`
+  - `price_vs_200dma_pct`
+  - `realized_volatility_20d`
 
 ### Spread Shift Decision Spec (Implemented)
 Goal: Align spread search with manual workflow by locking one spread width at the anchor and shifting by index along the option ladder.
@@ -267,6 +293,32 @@ Goal: Align spread search with manual workflow by locking one spread width at th
   - [x] `long_bid_ask_width` (Phase 2)
   - [x] `short_bid_ask_width_pct` (Phase 2)
   - [x] `long_bid_ask_width_pct` (Phase 2)
+ - [ ] Planned next instrumentation slice for candidate logging:
+   - [ ] Market-context fields from current equity snapshot:
+     - [ ] `year_high_price`
+     - [ ] `year_low_price`
+     - [ ] `range_position_52w`
+     - [ ] `distance_to_52w_high_pct`
+     - [ ] `distance_to_52w_low_pct`
+   - [ ] Fill/execution quality fields:
+     - [ ] `fill_edge`
+     - [ ] `fill_edge_pct`
+     - [ ] `mid_capture_pct`
+     - [ ] `fill_quality_score`
+   - [ ] Structural-context fields:
+     - [ ] `anchor_vs_shift_status`
+     - [ ] `shift_steps_from_anchor`
+     - [ ] `short_strike_shift`
+     - [ ] `long_strike_shift`
+     - [ ] `shift_direction`
+   - [ ] Deferred until historical price bars or stored daily history exist:
+     - [ ] `return_20d`
+     - [ ] `return_40d`
+     - [ ] `return_60d`
+     - [ ] `price_vs_20dma_pct`
+     - [ ] `price_vs_50dma_pct`
+     - [ ] `price_vs_200dma_pct`
+     - [ ] `realized_volatility_20d`
 
 #### `rejections/rejections_tracking.csv`
 - [x] Keep this file and its current logging flow.
@@ -359,6 +411,26 @@ Scope while gates are not met:
 
 ### Checklist
 - [ ] Freeze and version feature schema from Phase 1 outputs.
+- [ ] Add candidate signal instrumentation before live score expansion:
+  - [ ] Add market-context fields from current snapshot data:
+    - [ ] `year_high_price`
+    - [ ] `year_low_price`
+    - [ ] `range_position_52w`
+    - [ ] `distance_to_52w_high_pct`
+    - [ ] `distance_to_52w_low_pct`
+  - [ ] Add fill/execution quality fields:
+    - [ ] `fill_edge`
+    - [ ] `fill_edge_pct`
+    - [ ] `mid_capture_pct`
+    - [ ] `fill_quality_score`
+  - [ ] Add structural-context fields:
+    - [ ] `anchor_vs_shift_status`
+    - [ ] `shift_steps_from_anchor`
+    - [ ] `short_strike_shift`
+    - [ ] `long_strike_shift`
+    - [ ] `shift_direction`
+  - [ ] Carry new fields through candidate logging, analytics datasets, and review outputs.
+  - [ ] Defer rolling return / moving-average features until historical price bars are available.
 - [ ] Add Phase 2 liquidity/fill-quality ranking component (keep premium formula unchanged):
   - [ ] Build a simple `fill_quality_score` from OI, volume, and bid/ask width metrics.
   - [ ] Keep pricing economics on Phase 1 expected-credit formula; treat liquidity as a separate ranking component.

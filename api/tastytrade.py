@@ -558,6 +558,12 @@ class TastytradeAPI:
             if quote_item.get("volume")
             else None,
             "market_cap": float(market_cap_raw) if market_cap_raw else None,
+            "year_high_price": float(quote_item.get("year-high-price"))
+            if quote_item.get("year-high-price")
+            else None,
+            "year_low_price": float(quote_item.get("year-low-price"))
+            if quote_item.get("year-low-price")
+            else None,
             "is_trading_halted": quote_item.get("is-trading-halted", False),
         }
 

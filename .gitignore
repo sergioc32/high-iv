@@ -13,3 +13,7 @@ rejections/
 analysis/reports/
 analysis/analysis_dataset.csv
 opportunities/opportunity_candidates.csv
+refactorPlan.md
+phase2Main.md
+backfill_closed_trade_actuals.py
+trades/trades_closed.csv.bak
