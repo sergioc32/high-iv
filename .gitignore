@@ -17,3 +17,5 @@ refactorPlan.md
 phase2Main.md
 backfill_closed_trade_actuals.py
 trades/trades_closed.csv.bak
+*.csv
+opportunities/put_spread_opportunities_20260427_202223_indicative.csv

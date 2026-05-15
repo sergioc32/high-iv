@@ -12,10 +12,12 @@ Candidate-level, entry-time dataset. One row per evaluated spread candidate.
 - Entry-time only features.
 - No outcome-time fields in this dataset.
 - Append-only logging.
+- Strategy-aware schema evolution must not break the current daily put-spread run.
 
 ### Primary keys
 - run_id: string (format YYYYMMDD_HHMMSS)
 - snapshot_ts: ISO-8601 datetime string
+- strategy_id: string, required for multi-strategy rows, defaults to `put_credit_spread` for legacy put-only interpretation
 - symbol: underlying ticker
 - expiration_date: YYYY-MM-DD
 - short_strike: float
@@ -25,6 +27,12 @@ Candidate-level, entry-time dataset. One row per evaluated spread candidate.
 - run_id: string, required
 - snapshot_ts: string, required, ISO-8601
 - strategy_version: string, required for new rows, strategy engine label (for example v1_conservative, v2_dynamic)
+- strategy_id: string, optional for legacy rows and required for new multi-strategy rows, example values `put_credit_spread`, `call_credit_spread`
+- strategy_family: string, optional, example `credit_spread`
+- option_side: string, optional, example `put`, `call`
+- directional_bias: string, optional, example `bullish`, `bearish`, `neutral_to_bullish`, `neutral_to_bearish`
+- short_leg_type: string, optional, example `short_put`, `short_call`
+- long_leg_type: string, optional, example `long_put`, `long_call`
 - symbol: string, required
 - expiration_date: string, required, YYYY-MM-DD
 - dte: integer, required, days
@@ -72,6 +80,7 @@ Candidate-level, entry-time dataset. One row per evaluated spread candidate.
 ### Candidate status rules
 - selected=True => candidate_status must be selected.
 - selected=False => candidate_status must be rejected.
+- Within a strategy-aware run, exactly one selected candidate per `(run_id, strategy_id, symbol, expiration_date)` group is expected unless the symbol has no valid candidate for that strategy.
 - selected=False may include reasons such as:
   - selected_ranked_out
   - credit_natural_too_low
@@ -84,10 +93,24 @@ Candidate-level, entry-time dataset. One row per evaluated spread candidate.
   - long_leg_missing_quote
   - itm_or_atm
 
+### Strategy compatibility policy
+- Legacy put-only rows that predate multi-strategy logging may omit `strategy_id`, `strategy_family`, `option_side`, `directional_bias`, `short_leg_type`, and `long_leg_type`.
+- When these fields are missing for historical put rows, downstream analytics should interpret them as:
+  - `strategy_id = put_credit_spread`
+  - `strategy_family = credit_spread`
+  - `option_side = put`
+  - `directional_bias = bullish`
+  - `short_leg_type = short_put`
+  - `long_leg_type = long_put`
+- New rows written after multi-strategy support is introduced should populate these fields explicitly.
+- Schema rollout should preserve compatibility with the current daily put strategy until the call strategy is fully integrated.
+
 ### Row Reading Cheat Sheet
 Use one candidate row as five blocks:
 
 1. Identity: what spread was tested?
+- strategy_id
+- option_side
 - symbol
 - expiration_date
 - short_strike
@@ -121,9 +144,9 @@ Use one candidate row as five blocks:
 - premium_per_width: premium normalized by spread width
 
 4. Option quality and skew: how rich is the short leg?
-- short_delta: absolute delta of the short put
-- short_iv: IV of the short put
-- atm_iv: IV of the ATM put for the same expiration
+- short_delta: absolute delta of the short option
+- short_iv: IV of the short option
+- atm_iv: IV of the nearest ATM option for the same expiration and same option side
 - skew_ratio: short_iv / atm_iv
 - skew_diff: short_iv - atm_iv
 - ev_score: current ranking score, computed as (premium / max_loss) * (1 - short_delta)
@@ -164,7 +187,7 @@ Normalized analytics table joining candidate rows with trade lifecycle fields.
 - Outcome columns are for evaluation and reporting only.
 
 ### Entry-time feature columns
-- Identity and structure: run_id, snapshot_ts, symbol, expiration_date, dte, stock_price, short_strike, long_strike, width
+- Identity and structure: run_id, snapshot_ts, strategy_id, strategy_family, option_side, directional_bias, symbol, expiration_date, dte, stock_price, short_strike, long_strike, width
 - Spread metrics: credit_mid, credit_natural, credit_expected, fill_quality, avg_width_pct, mid_weight, premium, premium_per_width, max_profit, max_loss, risk_reward_ratio, ev_score
 - Option metrics: short_delta, short_iv, atm_iv, skew_ratio, skew_diff
 - Context: earnings_within_dte
@@ -194,6 +217,7 @@ Dense rejected-candidate analytics table derived from `opportunities/opportunity
 ### Source policy
 - base candidate columns come from `opportunities/opportunity_candidates.csv`
 - derived fields are added for tuning analysis only
+- strategy identity fields should be preserved from the candidate log before any derived rejection bucketing is applied
 
 ### Derived fields
 - `rejection_bucket`
@@ -224,6 +248,7 @@ Dense executed-trade table derived from the reconciled reporting dataset plus ca
 ### Source policy
 - trade linkage and outcome fields come from `analysis/analysis_dataset.csv`
 - candidate-only enrichment fields not present in the reporting dataset may be backfilled from `opportunities/opportunity_candidates.csv`
+- strategy identity fields must be preserved so executed-trade analysis can be segmented by strategy
 
 ### Additional metadata
 - `entry_match_quality`
@@ -253,4 +278,5 @@ Symbol-level rejection counters per run. Diagnostic only.
 - Delta values are absolute and expected in [0, 1].
 - Ratios must be >= 0 when present.
 - Required identity fields must not be blank.
+- Historical rows may rely on documented default strategy interpretation during migration, but new multi-strategy rows should populate explicit strategy identity fields.
 - Schema changes require explicit versioned update to this contract.

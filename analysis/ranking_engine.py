@@ -29,10 +29,14 @@ import argparse
 import csv
 import sys
 from bisect import bisect_left, bisect_right
+from collections import defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
+
+import config  # noqa: E402 (config is expected to be in the project root)
+from screener.strategy_types import CALL_CREDIT_SPREAD, PUT_CREDIT_SPREAD
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CANDIDATES_PATH = PROJECT_ROOT / "opportunities" / "opportunity_candidates.csv"
@@ -41,7 +45,6 @@ DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "analysis" / "reports"
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-import config  # noqa: E402 (config is expected to be in the project root)
 
 LIQUIDITY_REASONS = {
     "short_bid_ask_width",
@@ -69,6 +72,26 @@ class CalibrationSet:
     skew_diff: list[float]
     risk_reward_ratio: list[float]
     ev_scores: list[float]
+
+
+@dataclass(frozen=True)
+class StrategyRankingProfile:
+    """Strategy-aware ranking configuration."""
+
+    strategy_id: str
+    delta_target: float
+    delta_bonus_floor: float
+    delta_penalty_start: float
+    delta_penalty_steep: float
+    delta_hard_ceiling: float
+    delta_bonus_max: float
+    delta_penalty_max: float
+    skew_ratio_weight: float
+    skew_diff_weight: float
+    otm_bonus_multiplier: float
+    itm_penalty_multiplier: float
+    extension_preference: str
+    component_weights: dict[str, float]
 
 
 def load_csv_rows(path: Path) -> list[dict[str, str]]:
@@ -103,6 +126,62 @@ def parse_iso_date(value: object) -> date | None:
         return date.fromisoformat(raw[:10])
     except ValueError:
         return None
+
+
+def normalize_strategy_id(strategy_id: object) -> str:
+    """Default blank legacy rows to the original put credit spread strategy."""
+    return str(strategy_id or "").strip() or PUT_CREDIT_SPREAD.strategy_id
+
+
+def strategy_profile(strategy_id: object) -> StrategyRankingProfile:
+    """Return the ranking profile for a spread strategy."""
+    normalized_strategy_id = normalize_strategy_id(strategy_id)
+    if normalized_strategy_id == CALL_CREDIT_SPREAD.strategy_id:
+        return StrategyRankingProfile(
+            strategy_id=normalized_strategy_id,
+            delta_target=config.CALL_RANK_DELTA_TARGET,
+            delta_bonus_floor=config.CALL_RANK_DELTA_BONUS_FLOOR,
+            delta_penalty_start=config.CALL_RANK_DELTA_PENALTY_START,
+            delta_penalty_steep=config.CALL_RANK_DELTA_PENALTY_STEEP,
+            delta_hard_ceiling=config.CALL_RANK_DELTA_HARD_CEILING,
+            delta_bonus_max=config.CALL_RANK_DELTA_BONUS_MAX,
+            delta_penalty_max=config.CALL_RANK_DELTA_PENALTY_MAX,
+            skew_ratio_weight=config.CALL_RANK_SKEW_RATIO_WEIGHT,
+            skew_diff_weight=config.CALL_RANK_SKEW_DIFF_WEIGHT,
+            otm_bonus_multiplier=config.CALL_RANK_OTM_BONUS_MULTIPLIER,
+            itm_penalty_multiplier=config.CALL_RANK_ITM_PENALTY_MULTIPLIER,
+            extension_preference="near_52w_high",
+            component_weights={
+                "delta": config.CALL_RANK_WEIGHT_DELTA,
+                "skew": config.CALL_RANK_WEIGHT_SKEW,
+                "ev": config.CALL_RANK_WEIGHT_EV,
+                "liquidity": config.CALL_RANK_WEIGHT_LIQUIDITY,
+                "extension": config.CALL_RANK_WEIGHT_EXTENSION,
+            },
+        )
+
+    return StrategyRankingProfile(
+        strategy_id=PUT_CREDIT_SPREAD.strategy_id,
+        delta_target=config.PUT_RANK_DELTA_TARGET,
+        delta_bonus_floor=config.PUT_RANK_DELTA_BONUS_FLOOR,
+        delta_penalty_start=config.PUT_RANK_DELTA_PENALTY_START,
+        delta_penalty_steep=config.PUT_RANK_DELTA_PENALTY_STEEP,
+        delta_hard_ceiling=config.PUT_RANK_DELTA_HARD_CEILING,
+        delta_bonus_max=config.PUT_RANK_DELTA_BONUS_MAX,
+        delta_penalty_max=config.PUT_RANK_DELTA_PENALTY_MAX,
+        skew_ratio_weight=config.PUT_RANK_SKEW_RATIO_WEIGHT,
+        skew_diff_weight=config.PUT_RANK_SKEW_DIFF_WEIGHT,
+        otm_bonus_multiplier=config.PUT_RANK_OTM_BONUS_MULTIPLIER,
+        itm_penalty_multiplier=config.PUT_RANK_ITM_PENALTY_MULTIPLIER,
+        extension_preference="near_52w_low",
+        component_weights={
+            "delta": config.PUT_RANK_WEIGHT_DELTA,
+            "skew": config.PUT_RANK_WEIGHT_SKEW,
+            "ev": config.PUT_RANK_WEIGHT_EV,
+            "liquidity": config.PUT_RANK_WEIGHT_LIQUIDITY,
+            "extension": config.PUT_RANK_WEIGHT_EXTENSION,
+        },
+    )
 
 
 def merge_alignment_flags(base_flags: str, extra_flag: str) -> str:
@@ -196,6 +275,19 @@ def build_calibration_set(rows: Iterable[dict[str, str]]) -> CalibrationSet:
     )
 
 
+def build_calibration_sets(
+    rows: Iterable[dict[str, str]],
+) -> dict[str, CalibrationSet]:
+    """Build one calibration set per strategy from selected candidate rows."""
+    rows_by_strategy: dict[str, list[dict[str, str]]] = defaultdict(list)
+    for row in rows:
+        rows_by_strategy[normalize_strategy_id(row.get("strategy_id"))].append(row)
+    return {
+        strategy_id: build_calibration_set(strategy_rows)
+        for strategy_id, strategy_rows in rows_by_strategy.items()
+    }
+
+
 def percentile_rank(
     values: list[float], value: float, *, higher_is_better: bool
 ) -> float | None:
@@ -231,11 +323,12 @@ def recompute_ev_score(row: dict[str, str]) -> float | None:
 
 def liquidity_score(
     row: dict[str, str],
-    rows_by_group: dict[tuple[str, str, str], list[dict[str, str]]],
+    rows_by_group: dict[tuple[str, str, str, str], list[dict[str, str]]],
 ) -> tuple[float | None, int]:
     """Score liquidity based on sibling candidate resilience within the same run group."""
     group_key = (
         (row.get("run_id") or "").strip(),
+        normalize_strategy_id(row.get("strategy_id")),
         (row.get("symbol") or "").strip(),
         (row.get("expiration_date") or "").strip(),
     )
@@ -267,11 +360,12 @@ def delta_preference_score(row: dict) -> float | None:
     if short_delta is None:
         return None
 
-    target = config.RANK_DELTA_TARGET  # 0.16
-    bonus_floor = config.RANK_DELTA_BONUS_FLOOR  # 0.13
-    penalty_steep = config.RANK_DELTA_PENALTY_STEEP  # 0.185
-    bonus_max = config.RANK_DELTA_BONUS_MAX  # 0.10
-    penalty_max = config.RANK_DELTA_PENALTY_MAX  # 0.30
+    profile = strategy_profile(row.get("strategy_id"))
+    target = profile.delta_target
+    bonus_floor = profile.delta_bonus_floor
+    penalty_steep = profile.delta_penalty_steep
+    bonus_max = profile.delta_bonus_max
+    penalty_max = profile.delta_penalty_max
 
     if short_delta <= bonus_floor:
         # At or below bonus floor: floor receives the full bonus
@@ -298,8 +392,9 @@ def skew_component_score(row: dict, calibration: CalibrationSet) -> float | None
     Weights are defined by RANK_SKEW_RATIO_WEIGHT and RANK_SKEW_DIFF_WEIGHT.
     Falls back to the single available sub-score if one feature is missing.
     """
-    ratio_weight = config.RANK_SKEW_RATIO_WEIGHT  # 0.55
-    diff_weight = config.RANK_SKEW_DIFF_WEIGHT  # 0.45
+    profile = strategy_profile(row.get("strategy_id"))
+    ratio_weight = profile.skew_ratio_weight
+    diff_weight = profile.skew_diff_weight
 
     ratio_score: float | None = None
     diff_score: float | None = None
@@ -333,6 +428,42 @@ def ev_component_score(row: dict, calibration: CalibrationSet) -> float | None:
     return percentile_rank(calibration.ev_scores, ev, higher_is_better=True)
 
 
+def _clamp_zero_one(value: float | None) -> float | None:
+    if value is None:
+        return None
+    return max(0.0, min(1.0, value))
+
+
+def extension_component_score(row: dict) -> float | None:
+    """Score 52-week extension in a strategy-aware direction."""
+    profile = strategy_profile(row.get("strategy_id"))
+    if profile.component_weights.get("extension", 0.0) <= 0:
+        return None
+
+    range_position = _clamp_zero_one(parse_float(row.get("range_position_52w", "")))
+    if profile.extension_preference == "near_52w_high":
+        distance_metric = parse_float(row.get("distance_to_52w_high_pct", ""))
+        distance_score = (
+            1.0 - _clamp_zero_one(distance_metric)
+            if distance_metric is not None
+            else None
+        )
+        range_score = range_position
+    else:
+        distance_metric = parse_float(row.get("distance_to_52w_low_pct", ""))
+        distance_score = (
+            1.0 - _clamp_zero_one(distance_metric)
+            if distance_metric is not None
+            else None
+        )
+        range_score = 1.0 - range_position if range_position is not None else None
+
+    parts = [value for value in (range_score, distance_score) if value is not None]
+    if not parts:
+        return None
+    return sum(parts) / len(parts)
+
+
 def directional_adjustment_factor(row: dict) -> float:
     """Return a multiplier that rewards preferred OTM candidates and penalises ITM drift.
 
@@ -343,10 +474,11 @@ def directional_adjustment_factor(row: dict) -> float:
     short_delta = parse_float(row.get("short_delta", ""))
     if short_delta is None:
         return 1.0
-    if short_delta < config.RANK_DELTA_TARGET:
-        return config.RANK_OTM_BONUS_MULTIPLIER
-    if short_delta > config.RANK_DELTA_PENALTY_STEEP:
-        return config.RANK_ITM_PENALTY_MULTIPLIER
+    profile = strategy_profile(row.get("strategy_id"))
+    if short_delta < profile.delta_target:
+        return profile.otm_bonus_multiplier
+    if short_delta > profile.delta_penalty_steep:
+        return profile.itm_penalty_multiplier
     return 1.0
 
 
@@ -356,12 +488,13 @@ def compute_alignment_flags(
     """Return a comma-separated tag string describing alignment characteristics."""
     flags: list[str] = []
     short_delta = parse_float(row.get("short_delta", ""))
+    profile = strategy_profile(row.get("strategy_id"))
     if short_delta is not None:
-        if short_delta <= config.RANK_DELTA_TARGET:
+        if short_delta <= profile.delta_target:
             flags.append("otm_preferred")
-        if short_delta > config.RANK_DELTA_PENALTY_STEEP:
+        if short_delta > profile.delta_penalty_steep:
             flags.append("itm_drift")
-        if short_delta >= config.RANK_DELTA_HARD_CEILING:
+        if short_delta >= profile.delta_hard_ceiling:
             flags.append("near_ceiling")
 
     skew = component_scores.get("skew")
@@ -370,6 +503,19 @@ def compute_alignment_flags(
             flags.append("rich_skew")
         elif skew < 0.30:
             flags.append("weak_skew")
+
+    extension = component_scores.get("extension")
+    if extension is not None:
+        if profile.extension_preference == "near_52w_high":
+            if extension >= 0.75:
+                flags.append("near_52w_high")
+            elif extension < 0.30:
+                flags.append("far_from_52w_high")
+        else:
+            if extension >= 0.75:
+                flags.append("near_52w_low")
+            elif extension < 0.30:
+                flags.append("far_from_52w_low")
 
     return ",".join(flags) if flags else "ok"
 
@@ -383,7 +529,7 @@ def confidence_score(
     available_components = sum(
         1 for value in component_scores.values() if value is not None
     )
-    coverage = available_components / len(COMPONENT_WEIGHTS)
+    coverage = available_components / len(component_scores)
     historical_support = min(1.0, calibration_count / 50.0)
     expected_group_size = 1 + config.SKEW_WINDOW_OTM + config.SKEW_WINDOW_ITM
     sibling_support = min(1.0, group_size / max(expected_group_size, 1))
@@ -398,12 +544,13 @@ def confidence_score(
     return score, band
 
 
-def weighted_total_score(component_scores: dict[str, float | None]) -> float:
+def weighted_total_score(row: dict, component_scores: dict[str, float | None]) -> float:
     """Combine component scores into a 0-100 total rank score."""
+    component_weights = strategy_profile(row.get("strategy_id")).component_weights
     available_weights = {
         name: weight
-        for name, weight in COMPONENT_WEIGHTS.items()
-        if component_scores.get(name) is not None
+        for name, weight in component_weights.items()
+        if component_scores.get(name) is not None and weight > 0
     }
     if not available_weights:
         return 0.0
@@ -432,12 +579,13 @@ def summarize_strengths(component_scores: dict[str, float | None]) -> str:
 
 def rows_grouped_by_run_symbol_expiration(
     rows: Iterable[dict[str, str]],
-) -> dict[tuple[str, str, str], list[dict[str, str]]]:
-    """Group candidate rows by run, symbol, and expiration for sibling analysis."""
-    grouped: dict[tuple[str, str, str], list[dict[str, str]]] = {}
+) -> dict[tuple[str, str, str, str], list[dict[str, str]]]:
+    """Group candidate rows by run, strategy, symbol, and expiration."""
+    grouped: dict[tuple[str, str, str, str], list[dict[str, str]]] = {}
     for row in rows:
         key = (
             (row.get("run_id") or "").strip(),
+            normalize_strategy_id(row.get("strategy_id")),
             (row.get("symbol") or "").strip(),
             (row.get("expiration_date") or "").strip(),
         )
@@ -454,7 +602,7 @@ def rank_selected_candidates(
     rows: list[dict[str, str]], run_id: str
 ) -> list[dict[str, str | float | int]]:
     """Rank selected candidates for a single run."""
-    calibration = build_calibration_set(rows)
+    calibrations = build_calibration_sets(rows)
     rows_by_group = rows_grouped_by_run_symbol_expiration(rows)
     selected_rows = [
         row
@@ -464,18 +612,24 @@ def rank_selected_candidates(
     if not selected_rows:
         raise ValueError(f"No selected candidates found for run_id={run_id}.")
 
-    calibration_count = sum(1 for row in rows if is_selected_row(row))
+    calibration_counts: dict[str, int] = defaultdict(int)
+    for row in rows:
+        if is_selected_row(row):
+            calibration_counts[normalize_strategy_id(row.get("strategy_id"))] += 1
     ranked_rows: list[dict[str, str | float | int]] = []
 
     for row in selected_rows:
+        strategy_id = normalize_strategy_id(row.get("strategy_id"))
+        calibration = calibrations.get(strategy_id, CalibrationSet([], [], [], [], []))
         liquidity, group_size = liquidity_score(row, rows_by_group)
         component_scores: dict[str, float | None] = {
             "delta": delta_preference_score(row),
             "skew": skew_component_score(row, calibration),
             "ev": ev_component_score(row, calibration),
             "liquidity": liquidity,
+            "extension": extension_component_score(row),
         }
-        base_score = weighted_total_score(component_scores)
+        base_score = weighted_total_score(row, component_scores)
         adjustment = directional_adjustment_factor(row)
         earnings_multiplier, earnings_flag = earnings_adjustment(row)
         strategy_alignment_score = round(
@@ -486,7 +640,7 @@ def rank_selected_candidates(
         flags = merge_alignment_flags(flags, earnings_flag)
         confidence, confidence_band = confidence_score(
             component_scores,
-            calibration_count=calibration_count,
+            calibration_count=calibration_counts.get(strategy_id, 0),
             group_size=group_size,
         )
         ev_val = round(
@@ -498,6 +652,7 @@ def rank_selected_candidates(
             {
                 "run_id": (row.get("run_id") or "").strip(),
                 "snapshot_ts": (row.get("snapshot_ts") or "").strip(),
+                "strategy_id": strategy_id,
                 "symbol": (row.get("symbol") or "").strip(),
                 "expiration_date": (row.get("expiration_date") or "").strip(),
                 "dte": (row.get("dte") or "").strip(),
@@ -524,6 +679,9 @@ def rank_selected_candidates(
                 "liquidity_component": round(component_scores["liquidity"], 4)
                 if component_scores["liquidity"] is not None
                 else "",
+                "extension_component": round(component_scores["extension"], 4)
+                if component_scores["extension"] is not None
+                else "",
                 "directional_adjustment": round(adjustment, 4),
                 "earnings_adjustment": round(earnings_multiplier, 4),
                 "strategy_alignment_score": strategy_alignment_score,
@@ -532,15 +690,16 @@ def rank_selected_candidates(
                 "confidence_score": round(confidence, 4),
                 "confidence_band": confidence_band,
                 "liquidity_group_size": group_size,
-                "calibration_selected_count": calibration_count,
+                "calibration_selected_count": calibration_counts.get(strategy_id, 0),
                 "explanation_summary": summarize_strengths(component_scores),
                 "delta_zone": (
                     "otm"
                     if short_delta_val is not None
-                    and short_delta_val < config.RANK_DELTA_TARGET
+                    and short_delta_val < strategy_profile(strategy_id).delta_target
                     else "itm_drift"
                     if short_delta_val is not None
-                    and short_delta_val > config.RANK_DELTA_PENALTY_STEEP
+                    and short_delta_val
+                    > strategy_profile(strategy_id).delta_penalty_steep
                     else "on_target"
                 ),
             }
@@ -571,6 +730,7 @@ def write_rankings(path: Path, rows: list[dict[str, str | float | int]]) -> None
         "rank",
         "run_id",
         "snapshot_ts",
+        "strategy_id",
         "symbol",
         "expiration_date",
         "dte",
@@ -589,6 +749,7 @@ def write_rankings(path: Path, rows: list[dict[str, str | float | int]]) -> None
         "skew_component",
         "ev_component",
         "liquidity_component",
+        "extension_component",
         "directional_adjustment",
         "earnings_adjustment",
         "strategy_alignment_score",
@@ -622,7 +783,8 @@ def build_report(
     for row in rows[:top_n]:
         lines.append(
             "- "
-            f"#{row['rank']} {row['symbol']} {row['short_strike']}/{row['long_strike']} "
+            f"#{row['rank']} {row['strategy_id']} {row['symbol']} "
+            f"{row['short_strike']}/{row['long_strike']} "
             f"align={row['strategy_alignment_score']} ev={row['ev_score']} "
             f"d={row['short_delta']} zone={row['delta_zone']} "
             f"conf={row['confidence_band']} flags=[{row['alignment_flags']}]"
@@ -644,61 +806,72 @@ def score_opportunities(opportunities: list[dict]) -> list[dict]:
     if not opportunities:
         return opportunities
 
-    # Build within-batch calibration lists
-    ev_list: list[float] = []
-    skew_ratio_list: list[float] = []
-    skew_diff_list: list[float] = []
-
+    opportunities_by_strategy: dict[str, list[dict]] = defaultdict(list)
     for opp in opportunities:
-        ev_val = opp.get("ev_score_chosen") or opp.get("ev_score")
-        if ev_val is not None:
-            ev = parse_float(ev_val)
-            if ev is not None:
-                ev_list.append(ev)
-        sr = parse_float(opp.get("skew_ratio"))
-        if sr is not None:
-            skew_ratio_list.append(sr)
-        sd = parse_float(opp.get("skew_diff"))
-        if sd is not None:
-            skew_diff_list.append(sd)
-
-    calibration = CalibrationSet(
-        premium_per_width=[],
-        skew_ratio=sorted(skew_ratio_list),
-        skew_diff=sorted(skew_diff_list),
-        risk_reward_ratio=[],
-        ev_scores=sorted(ev_list),
-    )
-
-    for opp in opportunities:
-        # Build a proxy row using the live dict keys the scoring functions expect
-        proxy: dict = {
-            "short_delta": opp.get("short_delta"),
-            "skew_ratio": opp.get("skew_ratio"),
-            "skew_diff": opp.get("skew_diff"),
-            "ev_score": opp.get("ev_score_chosen") or opp.get("ev_score"),
-            "dte": opp.get("dte"),
-            "snapshot_ts": opp.get("snapshot_ts"),
-            "earnings_within_dte": opp.get("earnings_within_dte"),
-        }
-
-        component_scores: dict[str, float | None] = {
-            "delta": delta_preference_score(proxy),
-            "skew": skew_component_score(proxy, calibration),
-            "ev": ev_component_score(proxy, calibration),
-            "liquidity": 0.5,  # neutral; rejection data not available in live mode
-        }
-
-        base_score = weighted_total_score(component_scores)
-        adjustment = directional_adjustment_factor(proxy)
-        earnings_multiplier, earnings_flag = earnings_adjustment(proxy)
-        opp["strategy_alignment_score"] = round(
-            min(100.0, base_score * adjustment * earnings_multiplier),
-            2,
+        opportunities_by_strategy[normalize_strategy_id(opp.get("strategy_id"))].append(
+            opp
         )
-        base_flags = compute_alignment_flags(proxy, component_scores)
-        opp["alignment_flags"] = merge_alignment_flags(base_flags, earnings_flag)
-        opp["earnings_adjustment"] = round(earnings_multiplier, 4)
+
+    for strategy_id, strategy_opportunities in opportunities_by_strategy.items():
+        ev_list: list[float] = []
+        skew_ratio_list: list[float] = []
+        skew_diff_list: list[float] = []
+
+        for opp in strategy_opportunities:
+            ev_val = opp.get("ev_score_chosen") or opp.get("ev_score")
+            if ev_val is not None:
+                ev = parse_float(ev_val)
+                if ev is not None:
+                    ev_list.append(ev)
+            sr = parse_float(opp.get("skew_ratio"))
+            if sr is not None:
+                skew_ratio_list.append(sr)
+            sd = parse_float(opp.get("skew_diff"))
+            if sd is not None:
+                skew_diff_list.append(sd)
+
+        calibration = CalibrationSet(
+            premium_per_width=[],
+            skew_ratio=sorted(skew_ratio_list),
+            skew_diff=sorted(skew_diff_list),
+            risk_reward_ratio=[],
+            ev_scores=sorted(ev_list),
+        )
+
+        for opp in strategy_opportunities:
+            # Build a proxy row using the live dict keys the scoring functions expect
+            proxy: dict = {
+                "strategy_id": strategy_id,
+                "short_delta": opp.get("short_delta"),
+                "skew_ratio": opp.get("skew_ratio"),
+                "skew_diff": opp.get("skew_diff"),
+                "ev_score": opp.get("ev_score_chosen") or opp.get("ev_score"),
+                "dte": opp.get("dte"),
+                "snapshot_ts": opp.get("snapshot_ts"),
+                "earnings_within_dte": opp.get("earnings_within_dte"),
+                "range_position_52w": opp.get("range_position_52w"),
+                "distance_to_52w_high_pct": opp.get("distance_to_52w_high_pct"),
+                "distance_to_52w_low_pct": opp.get("distance_to_52w_low_pct"),
+            }
+
+            component_scores: dict[str, float | None] = {
+                "delta": delta_preference_score(proxy),
+                "skew": skew_component_score(proxy, calibration),
+                "ev": ev_component_score(proxy, calibration),
+                "liquidity": 0.5,  # neutral; rejection data not available in live mode
+                "extension": extension_component_score(proxy),
+            }
+
+            base_score = weighted_total_score(proxy, component_scores)
+            adjustment = directional_adjustment_factor(proxy)
+            earnings_multiplier, earnings_flag = earnings_adjustment(proxy)
+            opp["strategy_alignment_score"] = round(
+                min(100.0, base_score * adjustment * earnings_multiplier),
+                2,
+            )
+            base_flags = compute_alignment_flags(proxy, component_scores)
+            opp["alignment_flags"] = merge_alignment_flags(base_flags, earnings_flag)
+            opp["earnings_adjustment"] = round(earnings_multiplier, 4)
 
     return sorted(
         opportunities,

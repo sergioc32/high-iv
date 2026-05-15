@@ -21,6 +21,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 import config  # noqa: E402
 from screener.spread_logging import CANDIDATE_FIELDNAMES  # noqa: E402
+from screener.strategy_types import PUT_CREDIT_SPREAD  # noqa: E402
 
 LIQUIDITY_REASONS = {
     "short_bid_ask_width",
@@ -122,14 +123,43 @@ def normalize_rejection_flags(flags: str) -> str:
     return "|".join(normalized_parts)
 
 
+def normalize_strategy_id(strategy_id: str) -> str:
+    """Default blank legacy rows to the original put credit spread strategy."""
+    return (strategy_id or "").strip() or PUT_CREDIT_SPREAD.strategy_id
+
+
+def resolve_target_delta(strategy_id: str) -> float:
+    """Return the configured target delta for the given strategy."""
+    normalized_strategy_id = normalize_strategy_id(strategy_id)
+    if normalized_strategy_id == "call_credit_spread":
+        return float(getattr(config, "CALL_TARGET_DELTA", config.TARGET_DELTA))
+    return float(getattr(config, "PUT_TARGET_DELTA", config.TARGET_DELTA))
+
+
+def compute_moneyness_pct(
+    stock_price: float | None,
+    short_strike: float | None,
+    strategy_id: str,
+) -> float | None:
+    """Return positive OTM distance for both put and call credit spreads."""
+    if stock_price in (None, 0) or short_strike is None:
+        return None
+
+    normalized_strategy_id = normalize_strategy_id(strategy_id)
+    if normalized_strategy_id == "call_credit_spread":
+        return (short_strike - stock_price) / stock_price
+    return (stock_price - short_strike) / stock_price
+
+
 def build_group_index(
     rows: list[dict[str, str]],
-) -> dict[tuple[str, str, str], list[dict[str, str]]]:
-    """Group rows by run, symbol, and expiration."""
-    grouped: dict[tuple[str, str, str], list[dict[str, str]]] = defaultdict(list)
+) -> dict[tuple[str, str, str, str], list[dict[str, str]]]:
+    """Group rows by run, strategy, symbol, and expiration."""
+    grouped: dict[tuple[str, str, str, str], list[dict[str, str]]] = defaultdict(list)
     for row in rows:
         key = (
             (row.get("run_id") or "").strip(),
+            normalize_strategy_id(row.get("strategy_id") or ""),
             (row.get("symbol") or "").strip(),
             (row.get("expiration_date") or "").strip(),
         )
@@ -147,19 +177,18 @@ def derive_row(
     width = parse_float(row.get("width"))
     premium = parse_float(row.get("premium"))
     short_delta = parse_float(row.get("short_delta"))
+    strategy_id = normalize_strategy_id(row.get("strategy_id") or "")
     rejection_reason = normalize_rejection_reason(
         row.get("rejection_reason_primary") or ""
     )
     rejection_flags = normalize_rejection_flags(row.get("rejection_reason_flags") or "")
 
     delta_distance_from_target = (
-        abs(short_delta - config.TARGET_DELTA) if short_delta is not None else None
-    )
-    moneyness_pct = (
-        (stock_price - short_strike) / stock_price
-        if stock_price not in (None, 0) and short_strike is not None
+        abs(short_delta - resolve_target_delta(strategy_id))
+        if short_delta is not None
         else None
     )
+    moneyness_pct = compute_moneyness_pct(stock_price, short_strike, strategy_id)
     premium_pct_of_width = (
         premium / (width * 100)
         if premium is not None and width not in (None, 0)
@@ -236,6 +265,7 @@ def build_rejected_candidate_dataset(
             grouped_rows[
                 (
                     (row.get("run_id") or "").strip(),
+                    normalize_strategy_id(row.get("strategy_id") or ""),
                     (row.get("symbol") or "").strip(),
                     (row.get("expiration_date") or "").strip(),
                 )

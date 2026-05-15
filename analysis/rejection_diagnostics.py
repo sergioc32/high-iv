@@ -12,12 +12,19 @@ from __future__ import annotations
 
 import argparse
 import csv
+import sys
 from collections import Counter, defaultdict
 from collections.abc import Iterable
 from datetime import date
 from pathlib import Path
 
+from screener.strategy_types import PUT_CREDIT_SPREAD
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+
 DEFAULT_SYMBOL_REJECTIONS_PATH = PROJECT_ROOT / "rejections" / "rejections_tracking.csv"
 DEFAULT_CANDIDATES_PATH = PROJECT_ROOT / "opportunities" / "opportunity_candidates.csv"
 
@@ -71,9 +78,27 @@ def as_int(value: str) -> int:
         return 0
 
 
+def normalize_strategy_id(strategy_id: str) -> str:
+    """Default blank legacy rows to the original put credit spread strategy."""
+    return (strategy_id or "").strip() or PUT_CREDIT_SPREAD.strategy_id
+
+
 def is_rejection_counter_column(column_name: str) -> bool:
     """Return True for symbol-level rejection counter fields."""
-    excluded = {"timestamp", "symbol", "strategy_version", "total_rejections"}
+    excluded = {
+        "timestamp",
+        "run_id",
+        "snapshot_ts",
+        "strategy_id",
+        "strategy_family",
+        "option_side",
+        "directional_bias",
+        "short_leg_type",
+        "long_leg_type",
+        "symbol",
+        "strategy_version",
+        "total_rejections",
+    }
     return column_name not in excluded
 
 
@@ -169,27 +194,42 @@ def summarize_symbol_level(
 
     reason_totals: Counter[str] = Counter()
     symbol_totals: Counter[str] = Counter()
+    strategy_reason_totals: dict[str, Counter[str]] = defaultdict(Counter)
+    strategy_symbol_totals: dict[str, Counter[str]] = defaultdict(Counter)
     symbols_with_rejections: set[str] = set()
 
     for row in rows:
         symbol = (row.get("symbol") or "").strip()
+        strategy_id = normalize_strategy_id(row.get("strategy_id") or "")
         total = as_int(row.get("total_rejections", "0"))
         if symbol:
             symbol_totals[symbol] += total
+            strategy_symbol_totals[strategy_id][symbol] += total
             if total > 0:
                 symbols_with_rejections.add(symbol)
 
         for col in counter_columns:
             normalized_reason = normalize_rejection_reason(col)
-            reason_totals[normalized_reason] += as_int(row.get(col, "0"))
+            count = as_int(row.get(col, "0"))
+            reason_totals[normalized_reason] += count
+            strategy_reason_totals[strategy_id][normalized_reason] += count
 
     return {
         "rows": len(rows),
         "unique_symbols": len(symbol_totals),
         "symbols_with_rejections": len(symbols_with_rejections),
         "reason_totals": reason_totals,
+        "strategy_reason_totals": strategy_reason_totals,
         "top_reasons": reason_totals.most_common(top_n),
         "top_symbols": symbol_totals.most_common(top_n),
+        "top_reasons_by_strategy": {
+            strategy_id: counter.most_common(top_n)
+            for strategy_id, counter in strategy_reason_totals.items()
+        },
+        "top_symbols_by_strategy": {
+            strategy_id: counter.most_common(top_n)
+            for strategy_id, counter in strategy_symbol_totals.items()
+        },
     }
 
 
@@ -204,15 +244,20 @@ def summarize_candidate_level(rows: list[dict[str, str]], top_n: int) -> dict:
     reason_counter: Counter[str] = Counter()
     symbol_reason_counter: dict[str, Counter[str]] = defaultdict(Counter)
     symbol_rejected_counter: Counter[str] = Counter()
+    strategy_reason_totals: dict[str, Counter[str]] = defaultdict(Counter)
+    strategy_symbol_totals: dict[str, Counter[str]] = defaultdict(Counter)
 
     for row in rejected_rows:
         symbol = (row.get("symbol") or "").strip()
+        strategy_id = normalize_strategy_id(row.get("strategy_id") or "")
         reason = normalize_rejection_reason(row.get("rejection_reason_primary") or "")
         reason = reason or "(blank)"
         reason_counter[reason] += 1
+        strategy_reason_totals[strategy_id][reason] += 1
         if symbol:
             symbol_rejected_counter[symbol] += 1
             symbol_reason_counter[symbol][reason] += 1
+            strategy_symbol_totals[strategy_id][symbol] += 1
 
     top_symbols_with_reason = []
     for symbol, count in symbol_rejected_counter.most_common(top_n):
@@ -223,8 +268,17 @@ def summarize_candidate_level(rows: list[dict[str, str]], top_n: int) -> dict:
         "rows": len(rows),
         "rejected_rows": len(rejected_rows),
         "reason_totals": reason_counter,
+        "strategy_reason_totals": strategy_reason_totals,
         "top_reasons": reason_counter.most_common(top_n),
         "top_symbols": top_symbols_with_reason,
+        "top_reasons_by_strategy": {
+            strategy_id: counter.most_common(top_n)
+            for strategy_id, counter in strategy_reason_totals.items()
+        },
+        "top_symbols_by_strategy": {
+            strategy_id: counter.most_common(top_n)
+            for strategy_id, counter in strategy_symbol_totals.items()
+        },
     }
 
 
@@ -290,6 +344,8 @@ def build_report_text(
         "Rollup Buckets (Symbol-Level)",
         *format_count_lines(symbol_bucket_totals.most_common(top_n)),
         "",
+        "Strategy Breakdown (Symbol-Level)",
+        "",
         "Candidate-Level Summary (opportunity_candidates.csv)",
         f"- Rows processed: {candidate_summary['rows']}",
         f"- Rejected candidate rows: {candidate_summary['rejected_rows']}",
@@ -300,6 +356,8 @@ def build_report_text(
         "",
         "Rollup Buckets (Candidate-Level)",
         *format_count_lines(candidate_bucket_totals.most_common(top_n)),
+        "",
+        "Strategy Breakdown (Candidate-Level)",
         "",
         "Reason Name Coverage Comparison",
         f"- Overlap count: {len(comparison['overlap'])}",
@@ -323,6 +381,40 @@ def build_report_text(
         )
     else:
         lines.append("- (none)")
+
+    symbol_strategy_lines_added = False
+    for strategy_id, reasons in symbol_summary.get(
+        "top_reasons_by_strategy", {}
+    ).items():
+        symbol_strategy_lines_added = True
+        lines.extend(
+            [
+                f"- {strategy_id} top reasons:",
+                *format_count_lines(reasons, prefix="  "),
+            ]
+        )
+    if not symbol_strategy_lines_added:
+        insert_at = (
+            lines.index("Candidate-Level Summary (opportunity_candidates.csv)") - 1
+        )
+        lines.insert(insert_at, "- (none)")
+
+    candidate_strategy_index = lines.index("Reason Name Coverage Comparison") - 1
+    candidate_strategy_lines: list[str] = []
+    candidate_strategy_lines_added = False
+    for strategy_id, reasons in candidate_summary.get(
+        "top_reasons_by_strategy", {}
+    ).items():
+        candidate_strategy_lines_added = True
+        candidate_strategy_lines.extend(
+            [
+                f"- {strategy_id} top reasons:",
+                *format_count_lines(reasons, prefix="  "),
+            ]
+        )
+    if not candidate_strategy_lines_added:
+        candidate_strategy_lines.append("- (none)")
+    lines[candidate_strategy_index:candidate_strategy_index] = candidate_strategy_lines
 
     return "\n".join(lines)
 

@@ -31,5 +31,9 @@ class ScreenerRunResult:
     screened_symbols_count: int = 0
     raw_opportunities_count: int = 0
     final_opportunities: list[dict[str, object]] = field(default_factory=list)
+    put_final_opportunities: list[dict[str, object]] = field(default_factory=list)
+    call_final_opportunities: list[dict[str, object]] = field(default_factory=list)
     diagnostics: dict[str, int] = field(default_factory=dict)
     saved_csv_path: str | None = None
+    put_saved_csv_path: str | None = None
+    call_saved_csv_path: str | None = None

@@ -13,62 +13,22 @@ The output is a human-readable audit summary intended for manual review.
 from __future__ import annotations
 
 import csv
+import sys
 from collections import Counter, defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
+from screener.spread_logging import CANDIDATE_FIELDNAMES
+from screener.strategy_types import CALL_CREDIT_SPREAD, PUT_CREDIT_SPREAD
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 CANDIDATES_PATH = PROJECT_ROOT / "opportunities" / "opportunity_candidates.csv"
 
-EXPECTED_CANDIDATE_COLUMNS = [
-    "run_id",
-    "snapshot_ts",
-    "strategy_version",
-    "symbol",
-    "expiration_date",
-    "dte",
-    "stock_price",
-    "year_high_price",
-    "year_low_price",
-    "range_position_52w",
-    "distance_to_52w_high_pct",
-    "distance_to_52w_low_pct",
-    "short_strike",
-    "long_strike",
-    "width",
-    "credit_mid",
-    "credit_natural",
-    "credit_expected",
-    "fill_quality",
-    "fill_edge",
-    "fill_edge_pct",
-    "mid_capture_pct",
-    "fill_quality_score",
-    "avg_width_pct",
-    "mid_weight",
-    "premium",
-    "premium_per_width",
-    "max_profit",
-    "max_loss",
-    "risk_reward_ratio",
-    "ev_score",
-    "short_delta",
-    "short_iv",
-    "atm_iv",
-    "skew_ratio",
-    "skew_diff",
-    "earnings_within_dte",
-    "anchor_vs_shift_status",
-    "shift_steps_from_anchor",
-    "short_strike_shift",
-    "long_strike_shift",
-    "shift_direction",
-    "candidate_status",
-    "selected",
-    "rejection_reason_primary",
-    "rejection_reason_flags",
-]
+EXPECTED_CANDIDATE_COLUMNS = list(CANDIDATE_FIELDNAMES)
 
 ALLOWED_CANDIDATE_STATUS = {"selected", "rejected"}
 ALLOWED_SELECTED_VALUES = {"true", "false"}
@@ -76,8 +36,6 @@ VALID_ECONOMICS_EXPECTED_REASONS = {
     "",
     "selected_ranked_out",
     "risk_reward",
-    "credit_natural_too_low",
-    "credit_expected_too_low",
 }
 
 
@@ -119,6 +77,11 @@ def parse_bool_text(value: str) -> bool | None:
     return None
 
 
+def normalize_strategy_id(strategy_id: str) -> str:
+    """Default blank legacy rows to the original put credit spread strategy."""
+    return (strategy_id or "").strip() or PUT_CREDIT_SPREAD.strategy_id
+
+
 def audit_candidate_schema(header: list[str]) -> list[AuditIssue]:
     """Check candidate dataset schema against the expected contract."""
     issues: list[AuditIssue] = []
@@ -158,11 +121,12 @@ def audit_candidate_schema(header: list[str]) -> list[AuditIssue]:
 def audit_candidate_duplicates(rows: list[dict[str, str]]) -> list[AuditIssue]:
     """Detect duplicate candidate identity rows within the same run."""
     issues: list[AuditIssue] = []
-    counts: Counter[tuple[str, str, str, str, str, str]] = Counter()
+    counts: Counter[tuple[str, str, str, str, str, str, str]] = Counter()
 
     for row in rows:
         key = (
             row.get("run_id", ""),
+            normalize_strategy_id(row.get("strategy_id", "")),
             row.get("symbol", ""),
             row.get("expiration_date", ""),
             row.get("short_strike", ""),
@@ -174,14 +138,23 @@ def audit_candidate_duplicates(rows: list[dict[str, str]]) -> list[AuditIssue]:
     for key, count in counts.items():
         if count <= 1:
             continue
-        run_id, symbol, expiration_date, short_strike, long_strike, status = key
+        (
+            run_id,
+            strategy_id,
+            symbol,
+            expiration_date,
+            short_strike,
+            long_strike,
+            status,
+        ) = key
         issues.append(
             AuditIssue(
                 category="duplicates",
                 severity="warning",
                 message=(
                     "Duplicate candidate rows detected for "
-                    f"run_id={run_id}, symbol={symbol}, expiration={expiration_date}, "
+                    f"run_id={run_id}, strategy_id={strategy_id}, "
+                    f"symbol={symbol}, expiration={expiration_date}, "
                     f"short={short_strike}, long={long_strike}, status={status} "
                     f"({count} rows)"
                 ),
@@ -231,6 +204,7 @@ def audit_candidate_ranges(rows: list[dict[str, str]]) -> list[AuditIssue]:
         atm_iv = parse_float(row.get("atm_iv", ""))
         skew_ratio = parse_float(row.get("skew_ratio", ""))
         selected = parse_bool_text(row.get("selected", ""))
+        strategy_id = normalize_strategy_id(row.get("strategy_id", ""))
         candidate_status = (row.get("candidate_status") or "").strip().lower()
         rejection_reason = (row.get("rejection_reason_primary") or "").strip()
 
@@ -287,22 +261,34 @@ def audit_candidate_ranges(rows: list[dict[str, str]]) -> list[AuditIssue]:
         if (
             long_strike is not None
             and short_strike is not None
-            and long_strike >= short_strike
+            and (
+                (
+                    strategy_id == PUT_CREDIT_SPREAD.strategy_id
+                    and long_strike >= short_strike
+                )
+                or (
+                    strategy_id == CALL_CREDIT_SPREAD.strategy_id
+                    and long_strike <= short_strike
+                )
+            )
         ):
+            comparator_text = (
+                "below" if strategy_id == PUT_CREDIT_SPREAD.strategy_id else "above"
+            )
             issues.append(
                 AuditIssue(
                     category="consistency",
                     severity="error",
                     row_number=index,
                     message=(
-                        f"long_strike must be below short_strike for {symbol}: "
+                        f"long_strike must be {comparator_text} short_strike for {symbol}: "
                         f"{short_strike}/{long_strike}"
                     ),
                 )
             )
 
         if width is not None and short_strike is not None and long_strike is not None:
-            expected_width = round(short_strike - long_strike, 4)
+            expected_width = round(abs(short_strike - long_strike), 4)
             if round(width, 4) != expected_width:
                 issues.append(
                     AuditIssue(
@@ -339,7 +325,7 @@ def audit_candidate_ranges(rows: list[dict[str, str]]) -> list[AuditIssue]:
                 )
             )
 
-        if fill_quality is not None and fill_quality < 0:
+        if economics_should_be_valid and fill_quality is not None and fill_quality < 0:
             issues.append(
                 AuditIssue(
                     category="ranges",

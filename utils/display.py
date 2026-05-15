@@ -1,5 +1,5 @@
 """
-Display utilities for terminal output
+Display utilities for terminal output.
 """
 
 import pandas as pd
@@ -19,18 +19,13 @@ def _round_numeric_column(
     df[column_name] = series.round(decimals).fillna("")
 
 
-def display_opportunities(opportunities: list[dict]):
-    """
-    Display trade opportunities in a formatted table
-    """
+def _display_opportunities_table(opportunities: list[dict], title: str) -> None:
+    """Display trade opportunities in a formatted table."""
     if not opportunities:
-        print("\n✗ No trade opportunities found matching criteria\n")
+        print(f"\nNo {title.lower()} found matching criteria\n")
         return
 
-    # Convert to DataFrame for easier display
     df = pd.DataFrame(opportunities)
-
-    # Select and order columns
     display_cols = [
         "symbol",
         "stock_price",
@@ -51,11 +46,9 @@ def display_opportunities(opportunities: list[dict]):
         "dte",
     ]
 
-    # Only keep columns that actually exist in the data
-    display_cols = [c for c in display_cols if c in df.columns]
+    display_cols = [column for column in display_cols if column in df.columns]
     df = df[display_cols]
 
-    # Rename columns for display
     col_labels = {
         "symbol": "Symbol",
         "stock_price": "Stock $",
@@ -75,9 +68,8 @@ def display_opportunities(opportunities: list[dict]):
         "earnings_within_dte": "Earnings",
         "skew_ratio": "IV Skew Ratio",
     }
-    df.columns = [col_labels[c] for c in display_cols]
+    df.columns = [col_labels[column] for column in display_cols]
 
-    # Round numeric columns
     _round_numeric_column(df, "Stock $", 2)
     _round_numeric_column(df, "Premium", 2)
     _round_numeric_column(df, "Exp Credit", 2)
@@ -94,16 +86,30 @@ def display_opportunities(opportunities: list[dict]):
         df["Earnings"] = df["Earnings"].fillna("")
 
     print(f"\n{'=' * 100}")
-    print(f"Top {len(df)} Put Spread Opportunities")
+    print(title)
     print(f"{'=' * 100}")
     print(tabulate(df, headers="keys", tablefmt="grid", showindex=False))
     print(f"{'=' * 100}\n")
 
 
+def display_opportunities(opportunities: list[dict]):
+    """Backward-compatible default display for put opportunities."""
+    _display_opportunities_table(
+        opportunities, f"Top {len(opportunities)} Put Spread Opportunities"
+    )
+
+
+def display_strategy_opportunities(opportunities: list[dict], title: str) -> None:
+    """Display strategy-specific opportunities in a formatted table."""
+    _display_opportunities_table(opportunities, title)
+
+
 def display_trade_details(opportunity: dict):
-    """
-    Display detailed information for a single trade opportunity
-    """
+    """Display detailed information for a single trade opportunity."""
+    option_side = (opportunity.get("option_side") or "put").lower()
+    short_label = "Sell Call" if option_side == "call" else "Sell Put"
+    long_label = "Buy Call" if option_side == "call" else "Buy Put"
+
     print(f"\n{'=' * 60}")
     print(f"Trade Details: {opportunity['symbol']}")
     print(f"{'=' * 60}")
@@ -113,9 +119,9 @@ def display_trade_details(opportunity: dict):
     )
     print("\nSpread Structure:")
     print(
-        f"  Sell Put:         ${opportunity['short_strike']:.2f} (Delta: {opportunity['short_delta']:.3f})"
+        f"  {short_label}:       ${opportunity['short_strike']:.2f} (Delta: {opportunity['short_delta']:.3f})"
     )
-    print(f"  Buy Put:          ${opportunity['long_strike']:.2f}")
+    print(f"  {long_label}:        ${opportunity['long_strike']:.2f}")
     print(f"  Width:            ${opportunity['width']:.2f}")
     print("\nP&L Metrics:")
     print(f"  Premium Received: ${opportunity['premium']:.2f}")
@@ -124,10 +130,10 @@ def display_trade_details(opportunity: dict):
     print(f"  Risk/Reward:      {opportunity['risk_reward_ratio']:.2f}:1")
     print("\nPricing:")
     print(
-        f"  Short Put Bid/Ask: ${opportunity['short_bid']:.2f} / ${opportunity['short_ask']:.2f}"
+        f"  Short Leg Bid/Ask: ${opportunity['short_bid']:.2f} / ${opportunity['short_ask']:.2f}"
     )
     print(
-        f"  Long Put Bid/Ask:  ${opportunity['long_bid']:.2f} / ${opportunity['long_ask']:.2f}"
+        f"  Long Leg Bid/Ask:  ${opportunity['long_bid']:.2f} / ${opportunity['long_ask']:.2f}"
     )
     print(f"{'=' * 60}\n")
 
@@ -138,9 +144,7 @@ def display_summary(
     opportunities_count: int,
     execution_time: float,
 ):
-    """
-    Display summary statistics
-    """
+    """Display summary statistics."""
     print(f"\n{'=' * 60}")
     print("Screening Summary")
     print(f"{'=' * 60}")
@@ -155,16 +159,12 @@ def display_summary(
 
 
 def print_header():
-    """
-    Print application header
-    """
+    """Print application header."""
     print("\n" + "=" * 60)
-    print(" " * 15 + "OPTIONS PUT SPREAD SCREENER")
+    print(" " * 15 + "OPTIONS SPREAD SCREENER")
     print("=" * 60 + "\n")
 
 
 def print_progress(message: str):
-    """
-    Print progress indicator
-    """
-    print(f"⟳ {message}...")
+    """Print progress indicator."""
+    print(f"[...] {message}...")

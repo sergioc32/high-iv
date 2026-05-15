@@ -403,7 +403,12 @@ class TastytradeAPI:
                 )
                 if cached:
                     # Refresh stale cache entries that predate added fields.
-                    if "earnings_date" not in cached or "market_cap" not in cached:
+                    if (
+                        "earnings_date" not in cached
+                        or "market_cap" not in cached
+                        or "liquidity_rank" not in cached
+                        or "option_expiration_ivs" not in cached
+                    ):
                         symbols_to_fetch.append(sym)
                     else:
                         metrics_by_symbol[sym] = cached
@@ -433,13 +438,23 @@ class TastytradeAPI:
                     iv_percentile = (
                         float(iv_percentile_raw) * 100 if iv_percentile_raw else None
                     )
+                    expiration_ivs = {}
+                    for expiration_iv in item.get(
+                        "option-expiration-implied-volatilities", []
+                    ):
+                        expiration_date = expiration_iv.get("expiration-date")
+                        implied_volatility = expiration_iv.get("implied-volatility")
+                        if expiration_date and implied_volatility is not None:
+                            expiration_ivs[expiration_date] = float(implied_volatility)
                     record = {
                         "symbol": symbol,
                         "iv_rank": iv_rank,
                         "iv_percentile": iv_percentile,
                         "iv_index": item.get("implied-volatility-index"),
+                        "option_expiration_ivs": expiration_ivs,
                         "liquidity_rating": item.get("liquidity-rating"),
                         "liquidity_value": item.get("liquidity-value"),
+                        "liquidity_rank": item.get("liquidity-rank"),
                         "market_cap": float(market_cap_raw)
                         if market_cap_raw is not None
                         else None,

@@ -1,45 +1,46 @@
 """
-Options spread analysis - evaluates put spread opportunities.
+Call credit spread analyzer.
+
+This analyzer is wired into the daily runtime alongside the put analyzer. It
+reuses stable shared behavior from the put spread implementation where possible
+while overriding call-specific leg lookup, strike direction, shift semantics,
+config, and opportunity identity fields.
 """
 
 from __future__ import annotations
 
-from datetime import datetime
 from typing import Any
 
 import config
 from screener.chain_access import (
-    compute_skew_metrics,
-    get_put_by_strike,
+    compute_option_skew_metrics,
+    get_call_by_strike,
 )
 from screener.chain_access import (
     find_strike_by_delta as find_option_strike_by_delta,
 )
-from screener.spread_logging import CandidateLogWriter, RejectionLogWriter
+from screener.put_spread_analyzer import PutSpreadAnalyzer
 from screener.spread_models import (
     CandidateEvaluation,
     CandidatePair,
     RejectionCounters,
     RejectionReason,
-    SelectionResult,
 )
 from screener.spread_scoring import (
     abs_delta,
     compute_ev_score,
     compute_spread_metrics,
-    format_rejection_summary,
-    normalize_iv,
     to_float,
 )
-from screener.strategy_types import PUT_CREDIT_SPREAD
+from screener.strategy_types import CALL_CREDIT_SPREAD
 
 
-class _CandidateEvaluator:
-    """Evaluate one shift candidate against the configured strategy rules."""
+class _CallCandidateEvaluator:
+    """Evaluate one call-spread shift candidate against the configured rules."""
 
     def __init__(
         self,
-        analyzer: PutSpreadAnalyzer,
+        analyzer: CallSpreadAnalyzer,
         *,
         symbol: str,
         chain: dict[str, Any],
@@ -59,16 +60,16 @@ class _CandidateEvaluator:
         self.rejections = rejections
 
     def evaluate(self, candidate: CandidatePair) -> CandidateEvaluation | None:
-        if candidate.short_strike >= self.stock_price:
+        if candidate.short_strike <= self.stock_price:
             self._reject(RejectionReason.ITM_OR_ATM, candidate)
             return None
 
-        short_put = get_put_by_strike(self.chain, candidate.short_strike)
-        if not short_put:
+        short_call = get_call_by_strike(self.chain, candidate.short_strike)
+        if not short_call:
             self._reject(RejectionReason.SHORT_LEG_MISSING_QUOTE, candidate)
             return None
 
-        short_delta = abs_delta(short_put.get("delta"))
+        short_delta = abs_delta(short_call.get("delta"))
         if short_delta is None:
             self._reject(RejectionReason.DELTA_BOUNDS_MISSING, candidate)
             return None
@@ -78,7 +79,7 @@ class _CandidateEvaluator:
             return None
 
         if self.analyzer.enable_oi_filter:
-            short_open_interest = to_float(short_put.get("open_interest"))
+            short_open_interest = to_float(short_call.get("open_interest"))
             if (
                 short_open_interest is None
                 or short_open_interest
@@ -87,21 +88,21 @@ class _CandidateEvaluator:
                 self._reject(RejectionReason.OPEN_INTEREST, candidate)
                 return None
 
-        short_bid = to_float(short_put.get("bid"))
-        short_ask = to_float(short_put.get("ask"))
+        short_bid = to_float(short_call.get("bid"))
+        short_ask = to_float(short_call.get("ask"))
         if not self.analyzer.check_bid_ask_width(
             short_bid, short_ask, is_short_leg=True
         ):
             self._reject(RejectionReason.SHORT_BID_ASK_WIDTH, candidate)
             return None
 
-        long_put = get_put_by_strike(self.chain, candidate.long_strike)
-        if not long_put:
+        long_call = get_call_by_strike(self.chain, candidate.long_strike)
+        if not long_call:
             self._reject(RejectionReason.LONG_LEG_MISSING_QUOTE, candidate)
             return None
 
         if self.analyzer.enable_oi_filter:
-            long_open_interest = to_float(long_put.get("open_interest"))
+            long_open_interest = to_float(long_call.get("open_interest"))
             if (
                 long_open_interest is None
                 or long_open_interest < self.analyzer.min_option_open_interest_long_leg
@@ -109,8 +110,8 @@ class _CandidateEvaluator:
                 self._reject(RejectionReason.OPEN_INTEREST, candidate)
                 return None
 
-        long_bid = to_float(long_put.get("bid"))
-        long_ask = to_float(long_put.get("ask"))
+        long_bid = to_float(long_call.get("bid"))
+        long_ask = to_float(long_call.get("ask"))
         if not self.analyzer.check_bid_ask_width(
             long_bid, long_ask, is_short_leg=False
         ):
@@ -281,169 +282,53 @@ class _CandidateEvaluator:
         )
 
 
-class PutSpreadAnalyzer:
+class CallSpreadAnalyzer(PutSpreadAnalyzer):
+    """Standalone call credit spread analyzer."""
+
     def __init__(self, run_id: str | None = None, snapshot_ts: str | None = None):
-        self.target_dte = config.TARGET_DTE
-        self.dte_tolerance = config.DTE_TOLERANCE
-        self.target_delta = getattr(config, "PUT_TARGET_DELTA", config.TARGET_DELTA)
-        self.min_delta = getattr(config, "PUT_MIN_DELTA", config.MIN_DELTA)
-        self.max_delta = getattr(config, "PUT_MAX_DELTA", config.MAX_DELTA)
-        self.long_delta = getattr(config, "PUT_LONG_DELTA", config.LONG_PUT_DELTA)
-        self.preferred_width = config.PREFERRED_SPREAD_WIDTH
-        self.fallback_width = config.FALLBACK_SPREAD_WIDTH
-        self.max_strike_increment = config.MAX_STRIKE_INCREMENT
-        self.max_risk_reward = config.MAX_RISK_REWARD_RATIO
-        self.skew_window_otm = config.SKEW_WINDOW_OTM
-        self.skew_window_itm = config.SKEW_WINDOW_ITM
-        self.min_score_improvement = config.MIN_SCORE_IMPROVEMENT_PCT
-        self.max_short_bid_ask_width = config.MAX_SHORT_LEG_BID_ASK_WIDTH
-        self.max_short_bid_ask_width_pct = config.MAX_SHORT_LEG_BID_ASK_WIDTH_PCT
-        self.max_long_bid_ask_width = config.MAX_LONG_LEG_BID_ASK_WIDTH
-        self.max_long_bid_ask_width_pct = config.MAX_LONG_LEG_BID_ASK_WIDTH_PCT
-        self.min_credit_per_width = config.MIN_CREDIT_PER_WIDTH
-        self.min_natural_credit_pct = getattr(config, "MIN_NATURAL_CREDIT_PCT", 0.05)
-        self.credit_width_pct_tight = getattr(
-            config, "CREDIT_DYNAMIC_WIDTH_PCT_TIGHT", 0.10
+        super().__init__(run_id=run_id, snapshot_ts=snapshot_ts)
+        self.strategy_identity = CALL_CREDIT_SPREAD
+        self.target_delta = getattr(config, "CALL_TARGET_DELTA", self.target_delta)
+        self.min_delta = getattr(config, "CALL_MIN_DELTA", self.min_delta)
+        self.max_delta = getattr(config, "CALL_MAX_DELTA", self.max_delta)
+        self.long_delta = getattr(config, "LONG_CALL_DELTA", self.long_delta)
+        self.max_risk_reward = getattr(
+            config, "CALL_MAX_RISK_REWARD_RATIO", self.max_risk_reward
         )
-        self.credit_width_pct_ok = getattr(config, "CREDIT_DYNAMIC_WIDTH_PCT_OK", 0.20)
-        self.credit_width_pct_wide = getattr(
-            config, "CREDIT_DYNAMIC_WIDTH_PCT_WIDE", 0.35
+        self.min_credit_per_width = getattr(
+            config, "CALL_MIN_CREDIT_PER_WIDTH", self.min_credit_per_width
         )
-        self.credit_mid_weight_tight = getattr(
-            config, "CREDIT_DYNAMIC_MID_WEIGHT_TIGHT", 0.85
-        )
-        self.credit_mid_weight_ok = getattr(
-            config, "CREDIT_DYNAMIC_MID_WEIGHT_OK", 0.75
-        )
-        self.credit_mid_weight_moderate = getattr(
-            config, "CREDIT_DYNAMIC_MID_WEIGHT_MODERATE", 0.65
-        )
-        self.credit_mid_weight_very_wide = getattr(
-            config, "CREDIT_DYNAMIC_MID_WEIGHT_VERY_WIDE", 0.55
-        )
-        self.enable_oi_filter = getattr(config, "ENABLE_OI_FILTER", True)
-        fallback_oi_per_leg = getattr(config, "MIN_OPTION_OPEN_INTEREST_PER_LEG", 0)
-        self.min_option_open_interest_short_leg = getattr(
+        self.min_natural_credit_pct = getattr(
             config,
-            "MIN_OPTION_OPEN_INTEREST_SHORT_LEG",
-            fallback_oi_per_leg,
+            "CALL_MIN_NATURAL_CREDIT_PCT",
+            self.min_natural_credit_pct,
         )
-        self.min_option_open_interest_long_leg = getattr(
-            config,
-            "MIN_OPTION_OPEN_INTEREST_LONG_LEG",
-            fallback_oi_per_leg,
-        )
-        self.strategy_version = getattr(config, "STRATEGY_VERSION", "v2_dynamic")
-        self.legacy_strategy_version = getattr(
-            config, "LEGACY_STRATEGY_VERSION", "v1_conservative"
-        )
-        self.strategy_version_cutoff_date = getattr(
-            config, "STRATEGY_VERSION_CUTOFF_DATE", "2026-04-09"
-        )
-        self.run_id = run_id or datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.snapshot_ts = snapshot_ts or datetime.now().isoformat()
-        self.strategy_identity = PUT_CREDIT_SPREAD
-        self.candidate_logger = CandidateLogWriter(
-            "opportunities/opportunity_candidates.csv",
-            strategy_version=self.strategy_version,
-            legacy_strategy_version=self.legacy_strategy_version,
-            cutoff_date_text=self.strategy_version_cutoff_date,
-        )
-        self.rejection_logger = RejectionLogWriter(
-            "rejections/rejections_tracking.csv",
-            strategy_version=self.strategy_version,
-            legacy_strategy_version=self.legacy_strategy_version,
-            cutoff_date_text=self.strategy_version_cutoff_date,
-        )
-        self.strategy_rejections_by_symbol: dict[str, dict[str, int]] = {}
 
     @staticmethod
-    def _normalize_iv(iv_value: Any) -> float | None:
-        return normalize_iv(iv_value)
-
-    @staticmethod
-    def _get_put_by_strike(
+    def _get_call_by_strike(
         chain: dict[str, Any], target_strike: float | None
     ) -> dict[str, Any]:
-        return get_put_by_strike(chain, target_strike)
+        return get_call_by_strike(chain, target_strike)
 
-    @staticmethod
-    def _format_rejection_summary(rejections: dict[str, int]) -> str:
-        return format_rejection_summary(rejections)
+    def _find_anchor_strike(self, chain: dict[str, Any]) -> float | None:
+        return self.find_strike_by_delta(chain, self.target_delta)
 
-    def _extract_short_delta(self, put_data: dict[str, Any] | None) -> float | None:
-        if not put_data:
-            return None
-        return abs_delta(put_data.get("delta"))
-
-    def _is_delta_above_max(self, short_delta: float | None) -> bool:
-        return short_delta is not None and short_delta > self.max_delta
-
-    @staticmethod
-    def _extract_underlying_quote(chain: dict[str, Any]) -> dict[str, Any]:
-        quote = chain.get("underlying_quote")
-        return quote if isinstance(quote, dict) else {}
-
-    @staticmethod
-    def _compute_range_position_52w(
-        stock_price: float | None,
-        year_low_price: float | None,
-        year_high_price: float | None,
+    def _determine_locked_width(
+        self, anchor_strike: float, strikes_set: set[float]
     ) -> float | None:
-        if (
-            stock_price is None
-            or year_low_price is None
-            or year_high_price is None
-            or year_high_price <= year_low_price
+        for width_candidate in (
+            self.preferred_width,
+            self.fallback_width,
+            self.max_strike_increment,
         ):
-            return None
-        raw_position = (stock_price - year_low_price) / (
-            year_high_price - year_low_price
-        )
-        return max(0.0, min(raw_position, 1.0))
+            if width_candidate is None or width_candidate <= 0:
+                continue
+            if (anchor_strike + width_candidate) in strikes_set:
+                return float(width_candidate)
+        return None
 
-    @staticmethod
-    def _compute_fill_analytics(
-        *,
-        credit_mid: float | None,
-        credit_natural: float | None,
-        credit_expected: float | None,
-        fill_quality: float | None,
-        avg_width_pct: float | None,
-    ) -> tuple[float | None, float | None, float | None, float | None]:
-        if credit_expected is None or credit_natural is None:
-            return None, None, None, None
-
-        fill_edge = credit_expected - credit_natural
-        fill_edge_pct = (
-            fill_edge / abs(credit_expected)
-            if credit_expected not in (None, 0)
-            else None
-        )
-
-        mid_capture_pct = None
-        if credit_mid is not None:
-            capture_room = credit_mid - credit_natural
-            if capture_room > 0:
-                raw_capture = fill_edge / capture_room
-                mid_capture_pct = max(0.0, min(raw_capture, 1.0))
-
-        width_quality = None
-        if avg_width_pct is not None and avg_width_pct >= 0:
-            width_quality = 1.0 / (1.0 + avg_width_pct)
-
-        quality_parts = [
-            value
-            for value in (fill_quality, mid_capture_pct, width_quality)
-            if value is not None
-        ]
-        fill_quality_score = (
-            sum(quality_parts) / len(quality_parts) if quality_parts else None
-        )
-        return fill_edge, fill_edge_pct, mid_capture_pct, fill_quality_score
-
-    @staticmethod
     def _compute_shift_context(
+        self,
         *,
         short_strike: float | None,
         long_strike: float | None,
@@ -471,37 +356,20 @@ class PutSpreadAnalyzer:
             and width is not None
             and anchor_short_strike is not None
         ):
-            anchor_long_strike = anchor_short_strike - width
+            anchor_long_strike = anchor_short_strike + width
             long_shift = long_strike - anchor_long_strike
 
         return anchor_vs_shift_status, short_shift, long_shift, shift_direction
 
-    def _find_anchor_strike(self, chain: dict[str, Any]) -> float | None:
-        return self.find_strike_by_delta(chain, self.target_delta)
-
-    def _build_available_strikes(self, chain: dict[str, Any]) -> list[float]:
-        return sorted(
-            {
-                strike_float
-                for strike, data in chain.get("strikes", {}).items()
-                if isinstance(data, dict)
-                and (strike_float := to_float(strike)) is not None
-            }
-        )
-
-    def _determine_locked_width(
-        self, anchor_strike: float, strikes_set: set[float]
+    def find_strike_by_delta(
+        self, chain: dict[str, Any], target_delta: float, tolerance: float = 0.05
     ) -> float | None:
-        for width_candidate in (
-            self.preferred_width,
-            self.fallback_width,
-            self.max_strike_increment,
-        ):
-            if width_candidate is None or width_candidate <= 0:
-                continue
-            if (anchor_strike - width_candidate) in strikes_set:
-                return float(width_candidate)
-        return None
+        return find_option_strike_by_delta(
+            chain,
+            target_delta,
+            option_type="call",
+            tolerance=tolerance,
+        )
 
     def _build_candidate_pairs(
         self,
@@ -519,12 +387,12 @@ class PutSpreadAnalyzer:
     ) -> list[CandidatePair]:
         candidate_pairs: list[CandidatePair] = []
         for shift_steps in range(-self.skew_window_otm, self.skew_window_itm + 1):
-            short_index = anchor_index + shift_steps
+            short_index = anchor_index - shift_steps
             if short_index < 0 or short_index >= len(available_strikes):
                 continue
 
             short_strike = available_strikes[short_index]
-            long_strike = short_strike - locked_width
+            long_strike = short_strike + locked_width
             if long_strike not in strikes_set:
                 rejections.record(RejectionReason.LONG_STRIKE_UNAVAILABLE)
                 self._log_candidate(
@@ -555,49 +423,6 @@ class PutSpreadAnalyzer:
             )
         return candidate_pairs
 
-    def _select_best_candidate(
-        self,
-        *,
-        anchor_strike: float,
-        anchor_delta: float | None,
-        valid_candidates: list[CandidateEvaluation],
-    ) -> SelectionResult | None:
-        if not valid_candidates:
-            return None
-
-        ranked = sorted(
-            valid_candidates, key=lambda candidate: candidate.ev_score, reverse=True
-        )
-        best_candidate = ranked[0]
-        anchor_candidate = next(
-            (candidate for candidate in ranked if candidate.shift_steps == 0),
-            None,
-        )
-
-        chosen = best_candidate
-        if anchor_candidate and best_candidate.shift_steps != 0:
-            improvement_pct = self._score_improvement_pct(
-                anchor_candidate, best_candidate
-            )
-            if improvement_pct is None or improvement_pct < self.min_score_improvement:
-                chosen = anchor_candidate
-
-        return SelectionResult(
-            anchor_strike=anchor_strike,
-            anchor_delta=anchor_delta,
-            chosen=chosen,
-            anchor_candidate=anchor_candidate,
-            skew_steps_from_anchor=chosen.shift_steps,
-        )
-
-    @staticmethod
-    def _score_improvement_pct(
-        base: CandidateEvaluation, challenger: CandidateEvaluation
-    ) -> float | None:
-        if base.ev_score <= 0:
-            return None
-        return ((challenger.ev_score - base.ev_score) / base.ev_score) * 100
-
     def _log_candidate(
         self,
         *,
@@ -627,7 +452,9 @@ class PutSpreadAnalyzer:
         shift_steps_from_anchor: int | None = None,
     ) -> None:
         skew_metrics = (
-            compute_skew_metrics(chain, stock_price, short_strike)
+            compute_option_skew_metrics(
+                chain, stock_price, short_strike, option_type="call"
+            )
             if short_strike is not None
             else {
                 "short_iv": None,
@@ -636,8 +463,8 @@ class PutSpreadAnalyzer:
                 "skew_diff": None,
             }
         )
-        short_put = get_put_by_strike(chain, short_strike)
-        short_delta = abs_delta(short_put.get("delta")) if short_put else None
+        short_call = get_call_by_strike(chain, short_strike)
+        short_delta = abs_delta(short_call.get("delta")) if short_call else None
         premium_per_width = None
         if premium is not None and width:
             premium_per_width = round(premium / (width * 100), 4)
@@ -771,79 +598,6 @@ class PutSpreadAnalyzer:
         }
         self.candidate_logger.append_row(row)
 
-    def log_rejections(self, symbol: str, rejections: dict[str, int]) -> None:
-        self.rejection_logger.log(
-            symbol,
-            rejections,
-            run_id=self.run_id,
-            snapshot_ts=self.snapshot_ts,
-            strategy_identity=self.strategy_identity.log_fields(),
-        )
-
-    def find_target_expiration(
-        self, expirations: list[dict[str, Any]]
-    ) -> dict[str, Any] | None:
-        if not expirations:
-            return None
-
-        closest = min(
-            expirations,
-            key=lambda expiration: abs(
-                expiration["days_to_expiration"] - self.target_dte
-            ),
-        )
-        if abs(closest["days_to_expiration"] - self.target_dte) <= self.dte_tolerance:
-            return closest
-        return None
-
-    def detect_strike_increment(self, strikes: list[float]) -> float | None:
-        if not strikes or len(strikes) < 2:
-            return None
-
-        sorted_strikes = sorted(strikes)
-        diffs = [
-            round(sorted_strikes[index + 1] - sorted_strikes[index], 2)
-            for index in range(len(sorted_strikes) - 1)
-        ]
-        positive_diffs = [diff for diff in diffs if diff > 0]
-        if not positive_diffs:
-            return None
-
-        increment_counts: dict[float, int] = {}
-        for diff in positive_diffs:
-            increment_counts[diff] = increment_counts.get(diff, 0) + 1
-        return max(increment_counts, key=increment_counts.get)
-
-    def check_bid_ask_width(
-        self, bid: float | None, ask: float | None, is_short_leg: bool = True
-    ) -> bool:
-        if bid is None or ask is None or bid <= 0 or ask <= 0:
-            return False
-
-        width = ask - bid
-        mid = (bid + ask) / 2
-        if is_short_leg:
-            if width <= self.max_short_bid_ask_width:
-                return True
-            if mid > 0 and (width / mid) <= self.max_short_bid_ask_width_pct:
-                return True
-        else:
-            if width <= self.max_long_bid_ask_width:
-                return True
-            if mid > 0 and (width / mid) <= self.max_long_bid_ask_width_pct:
-                return True
-        return False
-
-    def find_strike_by_delta(
-        self, chain: dict[str, Any], target_delta: float, tolerance: float = 0.05
-    ) -> float | None:
-        return find_option_strike_by_delta(
-            chain,
-            target_delta,
-            option_type="put",
-            tolerance=tolerance,
-        )
-
     def find_spread_strikes(
         self,
         chain: dict[str, Any],
@@ -858,10 +612,10 @@ class PutSpreadAnalyzer:
         if anchor_strike is None:
             return None
 
-        anchor_put = get_put_by_strike(chain, anchor_strike)
-        if not anchor_put:
+        anchor_call = get_call_by_strike(chain, anchor_strike)
+        if not anchor_call:
             return None
-        anchor_delta = abs_delta(anchor_put.get("delta"))
+        anchor_delta = abs_delta(anchor_call.get("delta"))
 
         available_strikes = self._build_available_strikes(chain)
         if not available_strikes:
@@ -910,7 +664,7 @@ class PutSpreadAnalyzer:
             rejections=rejections,
         )
 
-        evaluator = _CandidateEvaluator(
+        evaluator = _CallCandidateEvaluator(
             self,
             symbol=symbol,
             chain=chain,
@@ -938,7 +692,7 @@ class PutSpreadAnalyzer:
                     self.log_rejections(debug_symbol, rejection_data)
                     rejection_summary = self._format_rejection_summary(rejection_data)
                     print(
-                        f"\n   x {debug_symbol}: No valid spreads found. Rejections: "
+                        f"\n   x {debug_symbol}: No valid call spreads found. Rejections: "
                         f"{rejection_summary}"
                     )
             return None
@@ -1011,16 +765,16 @@ class PutSpreadAnalyzer:
         if short_strike is None or long_strike is None or width is None:
             return None
 
-        short_put = get_put_by_strike(chain, short_strike)
-        long_put = get_put_by_strike(chain, long_strike)
-        if not short_put or not long_put:
+        short_call = get_call_by_strike(chain, short_strike)
+        long_call = get_call_by_strike(chain, long_strike)
+        if not short_call or not long_call:
             return None
 
-        short_bid = to_float(short_put.get("bid"))
-        short_ask = to_float(short_put.get("ask"))
-        long_bid = to_float(long_put.get("bid"))
-        long_ask = to_float(long_put.get("ask"))
-        short_delta = abs_delta(short_put.get("delta"))
+        short_bid = to_float(short_call.get("bid"))
+        short_ask = to_float(short_call.get("ask"))
+        long_bid = to_float(long_call.get("bid"))
+        long_ask = to_float(long_call.get("ask"))
+        short_delta = abs_delta(short_call.get("delta"))
 
         metrics = compute_spread_metrics(
             short_strike=short_strike,
@@ -1050,7 +804,7 @@ class PutSpreadAnalyzer:
             "short_strike": metrics.short_strike,
             "long_strike": metrics.long_strike,
             "width": metrics.width,
-            "short_delta": short_put.get("delta"),
+            "short_delta": short_call.get("delta"),
             "short_bid": metrics.short_bid,
             "short_ask": metrics.short_ask,
             "long_bid": metrics.long_bid,
@@ -1085,8 +839,8 @@ class PutSpreadAnalyzer:
         if metrics is None:
             return None
 
-        skew_metrics = compute_skew_metrics(
-            chain, stock_price, spread_strikes["short_strike"]
+        skew_metrics = compute_option_skew_metrics(
+            chain, stock_price, spread_strikes["short_strike"], option_type="call"
         )
         underlying_quote = self._extract_underlying_quote(chain)
         year_high_price = to_float(underlying_quote.get("year_high_price"))
@@ -1187,33 +941,3 @@ class PutSpreadAnalyzer:
             shift_steps_from_anchor=spread_strikes.get("skew_steps_from_anchor"),
         )
         return opportunity
-
-    def filter_opportunities(
-        self,
-        opportunities: list[dict[str, Any]],
-        max_results: int = config.MAX_FINAL_RESULTS,
-    ) -> list[dict[str, Any]]:
-        if not opportunities:
-            return []
-
-        filtered_opps = [
-            opportunity
-            for opportunity in opportunities
-            if not self._is_delta_above_max(
-                to_float(
-                    opportunity.get("chosen_delta", opportunity.get("short_delta"))
-                )
-            )
-        ]
-        if not filtered_opps:
-            return []
-
-        return sorted(
-            filtered_opps,
-            key=lambda opportunity: opportunity.get("ev_score_chosen") or 0,
-            reverse=True,
-        )[:max_results]
-
-
-# Backward-compatible alias for the current put-only runtime and imports.
-SpreadAnalyzer = PutSpreadAnalyzer
