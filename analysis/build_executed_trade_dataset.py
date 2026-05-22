@@ -7,6 +7,7 @@ table that is easier to use for trade-outcome analysis and future model prep.
 from __future__ import annotations
 
 import csv
+import re
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -131,6 +132,30 @@ def as_bool(value: object) -> bool:
     return str(value or "").strip().lower() in {"true", "1", "yes", "y"}
 
 
+def parse_float(value: object) -> float | None:
+    """Parse float-like CSV values, returning None for blanks or invalid data."""
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def populate_derived_candidate_fields(output: dict[str, object]) -> None:
+    """Backfill simple derived candidate fields when source rows omit them."""
+    if str(output.get("premium_per_width", "")).strip():
+        return
+
+    premium = parse_float(output.get("premium"))
+    width = parse_float(output.get("width"))
+    if premium is None or width in {None, 0.0}:
+        return
+
+    output["premium_per_width"] = f"{premium / width:.4f}"
+
+
 def candidate_lookup_key(row: dict[str, str]) -> tuple[str, str, str, str, str, str]:
     """Build a stable key for a candidate row."""
     return (
@@ -141,6 +166,32 @@ def candidate_lookup_key(row: dict[str, str]) -> tuple[str, str, str, str, str, 
         (row.get("short_strike") or "").strip(),
         (row.get("long_strike") or "").strip(),
     )
+
+
+def candidate_backfill_lookup_key(
+    run_id: str,
+    symbol: str,
+    expiration_date: str,
+    short_strike: str,
+    long_strike: str,
+) -> tuple[str, str, str, str, str]:
+    """Build a fallback key from daily opportunity run metadata."""
+    return (
+        run_id.strip(),
+        symbol.strip(),
+        expiration_date.strip(),
+        short_strike.strip(),
+        long_strike.strip(),
+    )
+
+
+def run_id_from_daily_opportunity_file(filename: str) -> str:
+    """Extract the originating run id from an opportunities_*.csv filename."""
+    match = re.search(
+        r"(?:put_spread_)?opportunities_(\d{8}_\d{6})",
+        filename or "",
+    )
+    return match.group(1) if match else ""
 
 
 def trade_identity_key(row: dict[str, str]) -> tuple[str, str, str, str, str]:
@@ -164,6 +215,27 @@ def build_candidate_lookup(
     return lookup
 
 
+def build_candidate_backfill_lookup(
+    candidate_rows: list[dict[str, str]],
+) -> dict[tuple[str, str, str, str, str], dict[str, str]]:
+    """Index candidate rows by run/file identity for promoted reviewed-context rows."""
+    lookup: dict[tuple[str, str, str, str, str], dict[str, str]] = {}
+    for row in candidate_rows:
+        run_id = (row.get("run_id") or "").strip()
+        if not run_id:
+            continue
+        lookup[
+            candidate_backfill_lookup_key(
+                run_id,
+                row.get("symbol") or "",
+                row.get("expiration_date") or "",
+                row.get("short_strike") or "",
+                row.get("long_strike") or "",
+            )
+        ] = row
+    return lookup
+
+
 def daily_lookup_key(row: dict[str, str]) -> tuple[str, str]:
     """Build a stable key for a same-day opportunities row."""
     return (
@@ -177,7 +249,14 @@ def build_daily_opportunity_lookup(
 ) -> dict[tuple[str, str], dict[str, str]]:
     """Index opportunities_*.csv rows by file name and row number."""
     lookup: dict[tuple[str, str], dict[str, str]] = {}
-    for path in sorted(opportunities_dir.glob("opportunities_*.csv")):
+    paths = sorted(opportunities_dir.glob("opportunities_*.csv")) + sorted(
+        opportunities_dir.glob("put_spread_opportunities_*.csv")
+    )
+    seen_names: set[str] = set()
+    for path in paths:
+        if path.name in seen_names:
+            continue
+        seen_names.add(path.name)
         with open(path, newline="", encoding="utf-8") as handle:
             reader = csv.DictReader(handle)
             for row_index, row in enumerate(reader, start=1):
@@ -230,14 +309,14 @@ def derive_feature_provenance(
         (source_row.get("daily_opportunity_match_type") or "").strip().lower()
     )
 
-    if match_status == "exact_match":
+    if match_status == "exact_match" and candidate_row_found:
         return {
             "feature_provenance": "candidate_log_exact",
             "reviewed_setup_found": "True",
             "reviewed_setup_match_type": "candidate_log_exact",
             "review_context_quality": "high",
         }
-    if match_status == "adjusted_match":
+    if match_status == "adjusted_match" and candidate_row_found:
         return {
             "feature_provenance": "candidate_log_adjusted",
             "reviewed_setup_found": "True",
@@ -277,18 +356,40 @@ def build_output_row(
     source_row: dict[str, str],
     analysis_header: list[str],
     candidate_lookup: dict[tuple[str, str, str, str, str, str], dict[str, str]],
+    candidate_backfill_lookup: dict[tuple[str, str, str, str, str], dict[str, str]],
     daily_opportunity_lookup: dict[tuple[str, str], dict[str, str]],
 ) -> dict[str, object]:
     """Build one executed-trade dataset row."""
     output = {column: source_row.get(column, "") for column in analysis_header}
     candidate_row = candidate_lookup.get(candidate_lookup_key(source_row), {})
     daily_row = daily_opportunity_lookup.get(daily_lookup_key(source_row), {})
+    if not candidate_row and daily_row:
+        daily_run_id = run_id_from_daily_opportunity_file(
+            source_row.get("daily_opportunity_file")
+            or daily_row.get("_source_file", "")
+        )
+        if daily_run_id:
+            candidate_row = candidate_backfill_lookup.get(
+                candidate_backfill_lookup_key(
+                    daily_run_id,
+                    daily_row.get("symbol") or source_row.get("symbol") or "",
+                    daily_row.get("expiration_date")
+                    or source_row.get("expiration_date")
+                    or "",
+                    daily_row.get("short_strike")
+                    or source_row.get("short_strike")
+                    or "",
+                    daily_row.get("long_strike") or source_row.get("long_strike") or "",
+                ),
+                {},
+            )
     feature_source_row = dict(daily_row)
     feature_source_row.update(candidate_row)
 
     for column in BASE_CANDIDATE_FIELDS + CANDIDATE_ONLY_FIELDS:
         if not str(output.get(column, "")).strip():
             output[column] = feature_source_row.get(column, "")
+    populate_derived_candidate_fields(output)
 
     output.update(
         derive_feature_provenance(
@@ -313,6 +414,7 @@ def build_executed_trade_dataset(
     analysis_header, analysis_rows = load_csv_rows(analysis_dataset_path)
     _, candidate_rows = load_csv_rows(candidates_path)
     candidate_index = build_candidate_lookup(candidate_rows)
+    candidate_backfill_index = build_candidate_backfill_lookup(candidate_rows)
     daily_opportunity_lookup = build_daily_opportunity_lookup(daily_opportunities_dir)
 
     trade_rows = [
@@ -342,6 +444,7 @@ def build_executed_trade_dataset(
             row,
             analysis_header,
             candidate_index,
+            candidate_backfill_index,
             daily_opportunity_lookup,
         )
         for row in best_by_trade.values()

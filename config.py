@@ -9,8 +9,8 @@ Configuration file for options screener.
 # Screening criteria
 IV_RANK_THRESHOLD = 40  # Minimum IV Rank %
 MIN_STOCK_PRICE = 25.00  # Minimum stock price ($25+ filters subscale names)
-MIN_LIQUIDITY_VOLUME = 2_000_000  # Minimum daily volume if available
-MIN_UNDERLYING_VOLUME = 2_000_000  # Minimum underlying daily share volume
+# MIN_LIQUIDITY_VOLUME = 1_000_000  # Minimum daily volume if available
+MIN_UNDERLYING_VOLUME = 1_000_000  # Minimum underlying daily share volume
 MIN_TASTY_LIQUIDITY_RATING = 2  # Tasty options liquidity rating, 1=thin, 4=most liquid
 ENABLE_OI_FILTER = False  # Toggle to enable/disable open interest filtering
 MIN_MARKET_CAP = 1_000_000_000  # Minimum market cap in USD
@@ -186,7 +186,7 @@ ORDER_HISTORY_LOOKBACK_DAYS = 14  # Recent order window for reconciliation
 ORDER_HISTORY_MAX_PAGES = 2  # Default page cap for recent order retrieval
 
 # Display / persistence
-MAX_SCREENING_RESULTS = 350  # Max stocks to show after IV screening
+MAX_SCREENING_RESULTS = 400  # Max stocks to show after IV screening
 MAX_FINAL_RESULTS = 30  # Max trade opportunities to display
 AUTO_SAVE_CSV = True  # Automatically save results to CSV file
 
@@ -194,9 +194,6 @@ AUTO_SAVE_CSV = True  # Automatically save results to CSV file
 STRATEGY_VERSION = "v2_dynamic"
 LEGACY_STRATEGY_VERSION = "v1_conservative"
 STRATEGY_VERSION_CUTOFF_DATE = "2026-04-09"
-
-# Manual exclusions
-EXCLUDE_SYMBOLS = []
 
 
 # ---------------------------------------------------------------------------
@@ -225,8 +222,6 @@ WATCHLISTS = {
     "tasty_ivr": "tasty IVR",
 }
 
-# Fallback list if the Liquid ETFs watchlist is unavailable
-ETF_FALLBACK = ["SPY", "QQQ", "IWM", "DIA", "XLF", "XLE", "XLK", "XLV"]
 
 # Account configuration
 TASTYTRADE_ACCOUNT_NUMBER = "5WU44666"  # Update with your account number

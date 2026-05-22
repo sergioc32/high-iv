@@ -18,12 +18,11 @@ from collections.abc import Iterable
 from datetime import date
 from pathlib import Path
 
-from screener.strategy_types import PUT_CREDIT_SPREAD
-
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from screener.strategy_types import PUT_CREDIT_SPREAD  # noqa: E402
 
 DEFAULT_SYMBOL_REJECTIONS_PATH = PROJECT_ROOT / "rejections" / "rejections_tracking.csv"
 DEFAULT_CANDIDATES_PATH = PROJECT_ROOT / "opportunities" / "opportunity_candidates.csv"

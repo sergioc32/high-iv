@@ -19,18 +19,23 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
-from screener.spread_logging import CANDIDATE_FIELDNAMES
-from screener.strategy_types import CALL_CREDIT_SPREAD, PUT_CREDIT_SPREAD
-
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+
+from screener.spread_logging import CANDIDATE_FIELDNAMES  # noqa: E402
+from screener.strategy_types import CALL_CREDIT_SPREAD, PUT_CREDIT_SPREAD  # noqa: E402
 
 CANDIDATES_PATH = PROJECT_ROOT / "opportunities" / "opportunity_candidates.csv"
 
 EXPECTED_CANDIDATE_COLUMNS = list(CANDIDATE_FIELDNAMES)
 
-ALLOWED_CANDIDATE_STATUS = {"selected", "rejected"}
+ALLOWED_CANDIDATE_STATUS = {
+    "selected",
+    "rejected",
+    "reviewed_context",
+    "executed_unmatched",
+}
 ALLOWED_SELECTED_VALUES = {"true", "false"}
 VALID_ECONOMICS_EXPECTED_REASONS = {
     "",
@@ -505,7 +510,11 @@ def audit_candidate_ranges(rows: list[dict[str, str]]) -> list[AuditIssue]:
                         ),
                     )
                 )
-            if not selected and candidate_status != "rejected":
+            if (
+                not selected
+                and candidate_status in {"selected", "rejected"}
+                and candidate_status != "rejected"
+            ):
                 issues.append(
                     AuditIssue(
                         category="consistency",

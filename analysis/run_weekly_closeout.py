@@ -158,6 +158,14 @@ def main() -> None:
         [sys.executable, "analysis/build_executed_trade_dataset.py"],
         "Building executed trade dataset",
     )
+    run_command(
+        [sys.executable, "ml/build_training_dataset.py"],
+        "Building training dataset",
+    )
+    run_command(
+        [sys.executable, "ml/training_data_audit.py"],
+        "Running training data audit",
+    )
 
     run_command(
         pipeline_command(

@@ -169,12 +169,16 @@ python analysis/run_weekly_closeout.py
 What this does:
 - Rebuilds `analysis/analysis_dataset.csv`
 - Runs `analysis/data_quality_audit.py`
+- Rebuilds `ml/training_dataset.csv`
+- Runs `ml/training_data_audit.py`
 - Runs weekly pipeline for latest completed week (Monday-Sunday)
 - Checks if previous week's report exists; if missing, runs previous week too
 
 Expected outputs:
 - `analysis/analysis_dataset.csv`
+- `ml/training_dataset.csv`
 - Latest week report artifacts in `analysis/reports/`
+- ML audit artifacts in `ml/reports/`
 - Optional catch-up report artifacts for previous week when needed
 
 How to use it:
@@ -196,6 +200,19 @@ Expected output:
 
 How to use it:
 - This is the canonical joined dataset used by weekly reporting
+
+How to read the terminal summary from `build_analysis_dataset.py`:
+- `Selected candidate direct-match diagnostic (narrow)` starts from `opportunities/opportunity_candidates.csv`
+- It compares only selected candidate-log rows against `trades/trades_open.csv` and `trades/trades_closed.csv`
+- `exact_match` there means the selected candidate row directly matched the executed trade on symbol, expiration, short strike, and long strike
+- `adjusted_match` there means the selected candidate row matched a nearby executed spread instead of the exact logged strikes
+- `missing_match` there means the selected candidate row did not directly reconcile in that narrow candidate-to-trade pass
+- This narrow section is useful for workflow diagnostics, but it is not the main answer to "did my trades come from opportunities?"
+
+- `Final trade-row reconciliation stats (primary)` is the main answer for actual executed trades
+- It reflects the final trade rows written into `analysis/analysis_dataset.csv` after recovery from direct candidate matches, daily opportunity snapshots, and fallback reconciliation
+- If this section says `exact_match=37`, `adjusted_match=11`, and `trade_only=8`, that means `48` trades were recovered from stored opportunity context and `8` were not
+- For manual trade review, prefer `analysis/executed_trade_dataset.csv` over `analysis/analysis_dataset.csv` because it is one row per trade and easier to inspect
 
 ### 2. Optional data quality check
 Checklist:
@@ -248,6 +265,7 @@ They are not part of the required daily trading loop.
 - reviewing successful and unsuccessful trades
 - checking data quality
 - preparing for future model work
+- monitoring whether the training dataset is becoming large enough and clean enough for experiments
 
 ### What they are not for
 - automatic trade execution
@@ -268,6 +286,20 @@ Important:
 - Do not tune ideas on `test`
 - Use `test` last
 - Right now the split is best used for disciplined analysis, not full model training
+
+### When to run ML commands directly
+Most of the time, you do not need to run ML commands separately because the weekly closeout now does that for you.
+
+Run them directly only when:
+- you want to refresh `ml/training_dataset.csv` without running the full weekly report flow
+- you changed ML dataset logic and want to regenerate the ML outputs only
+- you want to rerun the training audit after reviewing or editing the ML dataset
+
+Commands:
+```bash
+python ml/build_training_dataset.py
+python ml/training_data_audit.py
+```
 
 ## Decision Rules (Operating Discipline)
 
@@ -301,6 +333,11 @@ Weekly analytics products:
 - analysis/reports/weekly_report_<date>.md
 - analysis/reports/weekly_report_<date>.csv
 
+ML products:
+- ml/training_dataset.csv
+- ml/reports/training_data_audit.md
+- ml/reports/training_data_audit.csv
+
 ## Minimum Cadence Before Phase 2
 
 To keep Phase 1 reliable before moving on:
@@ -324,11 +361,5 @@ python main.py --fresh-day
 python analysis/run_weekly_closeout.py
 ```
 
-### Optional ML / training audit
-```bash
-python ml/build_training_dataset.py
-python ml/training_data_audit.py
-```
-
 The first two commands are the real operating loop.
-The ML commands are for strategy review and future model preparation.
+The weekly closeout command now refreshes both analytics and ML reporting in one pass.

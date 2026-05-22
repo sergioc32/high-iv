@@ -30,7 +30,10 @@ CANDIDATES_PATH = PROJECT_ROOT / "opportunities" / "opportunity_candidates.csv"
 TRADES_OPEN_PATH = PROJECT_ROOT / "trades" / "trades_open.csv"
 TRADES_CLOSED_PATH = PROJECT_ROOT / "trades" / "trades_closed.csv"
 OUTPUT_PATH = PROJECT_ROOT / "analysis" / "analysis_dataset.csv"
-DAILY_OPPORTUNITIES_GLOB = str(PROJECT_ROOT / "opportunities" / "opportunities_*.csv")
+DAILY_OPPORTUNITIES_GLOBS = (
+    str(PROJECT_ROOT / "opportunities" / "opportunities_*.csv"),
+    str(PROJECT_ROOT / "opportunities" / "put_spread_opportunities_*.csv"),
+)
 
 # Max calendar-day gap between candidate run date and trade entry date.
 # A wider window captures manual execution timing differences while preserving
@@ -70,6 +73,8 @@ OUTPUT_COLUMNS = [
     "selected",
     "rejection_reason_primary",
     "rejection_reason_flags",
+    "anchor_vs_shift_status",
+    "shift_steps_from_anchor",
     # --- Match metadata ---
     "match_status",
     "trade_status",
@@ -150,6 +155,8 @@ _CANDIDATE_PASSTHROUGH = [
     "selected",
     "rejection_reason_primary",
     "rejection_reason_flags",
+    "anchor_vs_shift_status",
+    "shift_steps_from_anchor",
 ]
 
 # Open-trade-specific columns to pull from trades_open.
@@ -372,9 +379,21 @@ def _compute_shift_fields(candidate: dict, trade: dict) -> tuple[str, str, str, 
 def _load_daily_opportunities_index() -> dict[date, list[dict]]:
     """Load opportunities_*.csv files and index rows by file date."""
     index: dict[date, list[dict]] = {}
-    for path in sorted(glob.glob(DAILY_OPPORTUNITIES_GLOB)):
+    seen_paths: set[str] = set()
+    matched_paths: list[str] = []
+    for pattern in DAILY_OPPORTUNITIES_GLOBS:
+        for path in glob.glob(pattern):
+            if path in seen_paths:
+                continue
+            seen_paths.add(path)
+            matched_paths.append(path)
+
+    for path in sorted(matched_paths):
         filename = os.path.basename(path)
-        match = re.search(r"opportunities_(\d{8})_\d+\.csv$", filename)
+        match = re.search(
+            r"(?:put_spread_)?opportunities_(\d{8})_\d+.*\.csv$",
+            filename,
+        )
         if not match:
             continue
 
@@ -391,6 +410,40 @@ def _load_daily_opportunities_index() -> dict[date, list[dict]]:
                 index.setdefault(file_date, []).append(row)
 
     return index
+
+
+def _promote_trade_only_match_from_daily_context(row: dict) -> None:
+    """Upgrade trade-only rows when daily opportunity linkage proves reviewed context."""
+    daily_match_type = (row.get("daily_opportunity_match_type") or "").strip().lower()
+    if daily_match_type not in {"exact", "shifted"}:
+        return
+
+    row["candidate_status"] = "reviewed_context"
+    row["match_status"] = (
+        "exact_match" if daily_match_type == "exact" else "adjusted_match"
+    )
+    row["execution_alignment"] = "exact" if daily_match_type == "exact" else "shifted"
+    row["trade_only_reason"] = ""
+
+    short_shift = _parse_float_or_none(row.get("daily_short_strike_shift", ""))
+    long_shift = _parse_float_or_none(row.get("daily_long_strike_shift", ""))
+    if short_shift is None or long_shift is None:
+        if daily_match_type == "exact":
+            row["short_strike_shift"] = "0.0000"
+            row["long_strike_shift"] = "0.0000"
+            row["shift_direction"] = "none"
+        return
+
+    row["short_strike_shift"] = f"{short_shift:.4f}"
+    row["long_strike_shift"] = f"{long_shift:.4f}"
+    if short_shift == 0 and long_shift == 0:
+        row["shift_direction"] = "none"
+    elif short_shift < 0 and long_shift < 0:
+        row["shift_direction"] = "otm_shift"
+    elif short_shift > 0 and long_shift > 0:
+        row["shift_direction"] = "itm_shift"
+    else:
+        row["shift_direction"] = "mixed_shift"
 
 
 def _find_daily_opportunity_match(
@@ -489,6 +542,16 @@ def _enrich_with_daily_opportunity_match(
     row["daily_opportunity_row"] = match_row.get("_row_index", "")
     row["daily_short_strike"] = match_row.get("short_strike", "")
     row["daily_long_strike"] = match_row.get("long_strike", "")
+
+    shift_steps_from_anchor = (match_row.get("skew_steps_from_anchor") or "").strip()
+    if shift_steps_from_anchor:
+        row["shift_steps_from_anchor"] = shift_steps_from_anchor
+        try:
+            row["anchor_vs_shift_status"] = (
+                "anchor" if int(float(shift_steps_from_anchor)) == 0 else "shifted"
+            )
+        except ValueError:
+            row["anchor_vs_shift_status"] = ""
 
     candidate_short = _parse_float_or_none(short_strike)
     candidate_long = _parse_float_or_none(long_strike)
@@ -733,6 +796,7 @@ def build_output_row(candidate: dict, trade: dict | None, match_status: str) -> 
         width=row.get("width", ""),
         daily_index=build_output_row.daily_index,
     )
+    _promote_trade_only_match_from_daily_context(row)
 
     return row
 
@@ -795,6 +859,7 @@ def build_trade_only_row(trade: dict, reason: str) -> dict:
         width=row.get("width", ""),
         daily_index=build_output_row.daily_index,
     )
+    _promote_trade_only_match_from_daily_context(row)
 
     return row
 
@@ -832,6 +897,10 @@ def build_analysis_dataset() -> None:
     not_applicable = 0
     trade_only_rows = 0
     matched_trade_ids: set[str] = set()
+    trade_row_exact = 0
+    trade_row_adjusted = 0
+    trade_row_closed = 0
+    trade_row_open = 0
 
     with open(OUTPUT_PATH, "w", newline="", encoding="utf-8") as fh:
         writer = csv.DictWriter(fh, fieldnames=OUTPUT_COLUMNS)
@@ -856,14 +925,24 @@ def build_analysis_dataset() -> None:
             )
             if trade is not None and match_status == "exact_match":
                 exact_matches += 1
+                trade_row_exact += 1
                 trade_id = (trade.get("trade_id") or "").strip()
                 if trade_id:
                     matched_trade_ids.add(trade_id)
+                if (trade.get("_trade_status") or "").strip().lower() == "open":
+                    trade_row_open += 1
+                elif (trade.get("_trade_status") or "").strip().lower() == "closed":
+                    trade_row_closed += 1
             elif trade is not None and match_status == "adjusted_match":
                 adjusted_matches += 1
+                trade_row_adjusted += 1
                 trade_id = (trade.get("trade_id") or "").strip()
                 if trade_id:
                     matched_trade_ids.add(trade_id)
+                if (trade.get("_trade_status") or "").strip().lower() == "open":
+                    trade_row_open += 1
+                elif (trade.get("_trade_status") or "").strip().lower() == "closed":
+                    trade_row_closed += 1
             else:
                 missing_matches += 1
 
@@ -891,21 +970,33 @@ def build_analysis_dataset() -> None:
 
             writer.writerow(build_trade_only_row(trade, reason))
             trade_only_rows += 1
+            trade_row_closed += 1
 
     total = len(candidates)
     selected_total = exact_matches + adjusted_matches + missing_matches
+    trade_row_total = trade_row_exact + trade_row_adjusted + trade_only_rows
     print(f"Analysis dataset written to: {OUTPUT_PATH}")
     print(f"Total candidates processed : {total}")
     print(f"  Rejected (not matched)   : {not_applicable}")
-    print(f"  Selected — exact_match   : {exact_matches}")
-    print(f"  Selected — adjusted_match: {adjusted_matches}")
-    print(f"  Selected — missing_match : {missing_matches}")
-    print(f"  Closed trade-only rows   : {trade_only_rows}")
+    print("Selected candidate direct-match diagnostic (narrow):")
+    print("  Measures only direct matches from selected candidate-log rows.")
+    print("  Does not include later recovery from daily opportunity snapshots.")
+    print(f"  exact_match              : {exact_matches}")
+    print(f"  adjusted_match           : {adjusted_matches}")
+    print(f"  missing_match            : {missing_matches}")
     if selected_total > 0:
         exact_rate = exact_matches / selected_total * 100
         total_rate = (exact_matches + adjusted_matches) / selected_total * 100
-        print(f"  Exact match rate         : {exact_rate:.1f}%")
-        print(f"  Exact+adjusted match rate: {total_rate:.1f}%")
+        print(f"  direct exact rate        : {exact_rate:.1f}%")
+        print(f"  direct exact+adjusted    : {total_rate:.1f}%")
+    print("Final trade-row reconciliation stats (primary):")
+    print("  This is the main summary for how many executed trades were recovered.")
+    print(f"  exact_match              : {trade_row_exact}")
+    print(f"  adjusted_match           : {trade_row_adjusted}")
+    print(f"  trade_only               : {trade_only_rows}")
+    print(f"  trade rows total         : {trade_row_total}")
+    print(f"  open trade rows          : {trade_row_open}")
+    print(f"  closed trade rows        : {trade_row_closed}")
 
 
 if __name__ == "__main__":
