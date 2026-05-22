@@ -151,6 +151,23 @@ def main() -> None:
         )
 
     run_command(
+        [sys.executable, "analysis/build_rejected_candidate_dataset.py"],
+        "Building rejected candidate dataset",
+    )
+    run_command(
+        [sys.executable, "analysis/build_executed_trade_dataset.py"],
+        "Building executed trade dataset",
+    )
+    run_command(
+        [sys.executable, "ml/build_training_dataset.py"],
+        "Building training dataset",
+    )
+    run_command(
+        [sys.executable, "ml/training_data_audit.py"],
+        "Running training data audit",
+    )
+
+    run_command(
         pipeline_command(
             start_date=latest_start,
             end_date=latest_end,
@@ -159,6 +176,25 @@ def main() -> None:
             output_prefix=args.output_prefix,
         ),
         f"Running weekly pipeline for latest week ({latest_start.isoformat()} to {latest_end.isoformat()})",
+    )
+
+    run_command(
+        [
+            sys.executable,
+            "analysis/rejected_candidate_review.py",
+            "--reports-dir",
+            str(args.reports_dir),
+        ],
+        "Running rejected candidate review",
+    )
+    run_command(
+        [
+            sys.executable,
+            "analysis/trade_outcome_review.py",
+            "--reports-dir",
+            str(args.reports_dir),
+        ],
+        "Running trade outcome review",
     )
 
     if not args.no_catchup:

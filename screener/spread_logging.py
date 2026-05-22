@@ -8,14 +8,27 @@ import csv
 from datetime import datetime
 from pathlib import Path
 
+from screener.strategy_types import PUT_CREDIT_SPREAD
+
 CANDIDATE_FIELDNAMES = [
     "run_id",
     "snapshot_ts",
     "strategy_version",
+    "strategy_id",
+    "strategy_family",
+    "option_side",
+    "directional_bias",
+    "short_leg_type",
+    "long_leg_type",
     "symbol",
     "expiration_date",
     "dte",
     "stock_price",
+    "year_high_price",
+    "year_low_price",
+    "range_position_52w",
+    "distance_to_52w_high_pct",
+    "distance_to_52w_low_pct",
     "short_strike",
     "long_strike",
     "width",
@@ -23,6 +36,10 @@ CANDIDATE_FIELDNAMES = [
     "credit_natural",
     "credit_expected",
     "fill_quality",
+    "fill_edge",
+    "fill_edge_pct",
+    "mid_capture_pct",
+    "fill_quality_score",
     "avg_width_pct",
     "mid_weight",
     "premium",
@@ -37,6 +54,11 @@ CANDIDATE_FIELDNAMES = [
     "skew_ratio",
     "skew_diff",
     "earnings_within_dte",
+    "anchor_vs_shift_status",
+    "shift_steps_from_anchor",
+    "short_strike_shift",
+    "long_strike_shift",
+    "shift_direction",
     "candidate_status",
     "selected",
     "rejection_reason_primary",
@@ -45,6 +67,14 @@ CANDIDATE_FIELDNAMES = [
 
 REJECTION_FIELDNAMES = [
     "timestamp",
+    "run_id",
+    "snapshot_ts",
+    "strategy_id",
+    "strategy_family",
+    "option_side",
+    "directional_bias",
+    "short_leg_type",
+    "long_leg_type",
     "symbol",
     "strategy_version",
     "delta_bounds",
@@ -177,14 +207,31 @@ class RejectionLogWriter:
         self.cutoff_date_text = cutoff_date_text
         self.fieldnames = list(REJECTION_FIELDNAMES)
 
-    def log(self, symbol: str, rejections: dict[str, int]) -> None:
+    def log(
+        self,
+        symbol: str,
+        rejections: dict[str, int],
+        *,
+        run_id: str | None = None,
+        snapshot_ts: str | None = None,
+        strategy_identity: dict[str, str] | None = None,
+    ) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         file_exists = self.path.is_file()
         if file_exists:
             self._migrate_if_needed()
 
+        identity = strategy_identity or PUT_CREDIT_SPREAD.log_fields()
         row = {
             "timestamp": datetime.now().isoformat(),
+            "run_id": run_id,
+            "snapshot_ts": snapshot_ts,
+            "strategy_id": identity["strategy_id"],
+            "strategy_family": identity["strategy_family"],
+            "option_side": identity["option_side"],
+            "directional_bias": identity["directional_bias"],
+            "short_leg_type": identity["short_leg_type"],
+            "long_leg_type": identity["long_leg_type"],
             "symbol": symbol,
             "strategy_version": self.strategy_version,
             "delta_bounds": rejections.get("delta_bounds", 0),
@@ -236,6 +283,14 @@ class RejectionLogWriter:
             needs_migration = (
                 "credit_conservative" in existing_fields
                 or "strategy_version" not in existing_fields
+                or "run_id" not in existing_fields
+                or "snapshot_ts" not in existing_fields
+                or "strategy_id" not in existing_fields
+                or "strategy_family" not in existing_fields
+                or "option_side" not in existing_fields
+                or "directional_bias" not in existing_fields
+                or "short_leg_type" not in existing_fields
+                or "long_leg_type" not in existing_fields
                 or "delta_bounds_min" not in existing_fields
                 or "delta_bounds_max" not in existing_fields
                 or "delta_bounds_missing" not in existing_fields
@@ -268,8 +323,22 @@ class RejectionLogWriter:
                     legacy_strategy_version=self.legacy_strategy_version,
                     cutoff_date_text=self.cutoff_date_text,
                 )
-            elif field in {"timestamp", "symbol"}:
+            elif field in {"timestamp", "symbol"} or field == "run_id":
                 normalized[field] = row.get(field, "")
+            elif field == "snapshot_ts":
+                normalized[field] = row.get(field, row.get("timestamp", ""))
+            elif field == "strategy_id":
+                normalized[field] = row.get(field) or PUT_CREDIT_SPREAD.strategy_id
+            elif field == "strategy_family":
+                normalized[field] = row.get(field) or PUT_CREDIT_SPREAD.strategy_family
+            elif field == "option_side":
+                normalized[field] = row.get(field) or PUT_CREDIT_SPREAD.option_side
+            elif field == "directional_bias":
+                normalized[field] = row.get(field) or PUT_CREDIT_SPREAD.directional_bias
+            elif field == "short_leg_type":
+                normalized[field] = row.get(field) or PUT_CREDIT_SPREAD.short_leg_type
+            elif field == "long_leg_type":
+                normalized[field] = row.get(field) or PUT_CREDIT_SPREAD.long_leg_type
             elif field == "total_rejections":
                 normalized[field] = sum(
                     int(row.get(key, 0) or 0)

@@ -12,6 +12,9 @@ class IVScreener:
         self.iv_rank_threshold = iv_rank_threshold
         self.min_stock_price = getattr(config, "MIN_STOCK_PRICE", 10.0)
         self.min_underlying_volume = config.MIN_UNDERLYING_VOLUME
+        self.min_tasty_liquidity_rating = getattr(
+            config, "MIN_TASTY_LIQUIDITY_RATING", 2
+        )
         self.min_market_cap = config.MIN_MARKET_CAP
 
     def filter_by_iv_rank(self, metrics_data: dict) -> pd.DataFrame:
@@ -31,6 +34,10 @@ class IVScreener:
             "iv_percentile",
             "iv_index",
             "volume",
+            "volume_for_filter",
+            "liquidity_rating",
+            "liquidity_value",
+            "liquidity_rank",
             "market_cap",
             "last",
             "last_price",
@@ -65,29 +72,66 @@ class IVScreener:
                 "⚠ No stock price column found ('last_price'/'last'); price filter skipped"
             )
 
-        # Require minimum underlying share volume
-        if "volume" in df.columns:
+        # Prefer Tasty's options-liquidity score; fall back to underlying share volume.
+        volume_col = (
+            "volume_for_filter" if "volume_for_filter" in df.columns else "volume"
+        )
+        if "liquidity_rating" in df.columns:
+            before_liquidity = len(df)
+            missing_liquidity = int(df["liquidity_rating"].isna().sum())
+            liquidity_mask = df["liquidity_rating"].isna() | (
+                df["liquidity_rating"] >= self.min_tasty_liquidity_rating
+            )
+            df = df[liquidity_mask]
+            filtered_liquidity = before_liquidity - len(df)
+            if filtered_liquidity > 0:
+                print(
+                    f"⚠ Filtered out {filtered_liquidity} low Tasty-liquidity names "
+                    f"(< rating {self.min_tasty_liquidity_rating})"
+                )
+            if missing_liquidity > 0:
+                print(
+                    f"⚠ {missing_liquidity} symbols missing Tasty liquidity rating; "
+                    "falling back to volume for them"
+                )
+
+        if volume_col in df.columns:
+            volume_fallback_mask = (
+                df["liquidity_rating"].isna()
+                if "liquidity_rating" in df.columns
+                else pd.Series(True, index=df.index)
+            )
             before_volume = len(df)
-            missing_volume = int(df["volume"].isna().sum())
-            volume_mask = df["volume"].isna() | (
-                df["volume"] >= self.min_underlying_volume
+            missing_volume = int(df.loc[volume_fallback_mask, volume_col].isna().sum())
+            volume_mask = (
+                (~volume_fallback_mask)
+                | df[volume_col].isna()
+                | (df[volume_col] >= self.min_underlying_volume)
             )
             df = df[volume_mask]
             filtered_volume = before_volume - len(df)
             if filtered_volume > 0:
+                volume_label = (
+                    "projected full-day volume"
+                    if volume_col == "volume_for_filter"
+                    else "underlying volume"
+                )
                 print(
-                    f"⚠ Filtered out {filtered_volume} low-volume names (< {self.min_underlying_volume:,})"
+                    f"⚠ Filtered out {filtered_volume} low-volume names by {volume_label} (< {self.min_underlying_volume:,})"
                 )
             if missing_volume > 0:
                 print(
-                    f"⚠ {missing_volume} symbols missing underlying volume; volume filter skipped for them"
+                    f"⚠ {missing_volume} symbols missing underlying volume; volume fallback skipped for them"
                 )
 
         # Require minimum market cap
         if "market_cap" in df.columns:
             before_market_cap = len(df)
-            missing_market_cap = int(df["market_cap"].isna().sum())
-            market_cap_mask = df["market_cap"].isna() | (
+            market_cap_not_applicable = df["market_cap"].isna() | (
+                df["market_cap"] <= 0
+            )
+            missing_market_cap = int(market_cap_not_applicable.sum())
+            market_cap_mask = market_cap_not_applicable | (
                 df["market_cap"] >= self.min_market_cap
             )
             df = df[market_cap_mask]
@@ -97,7 +141,7 @@ class IVScreener:
                     f"⚠ Filtered out {filtered_market_cap} small-cap names (< ${self.min_market_cap:,})"
                 )
             if missing_market_cap > 0:
-                missing_cap_df = df[df["market_cap"].isna()]
+                missing_cap_df = df[market_cap_not_applicable.loc[df.index]]
                 if "symbol" in missing_cap_df.columns:
                     missing_cap_symbols = (
                         missing_cap_df["symbol"].dropna().astype(str).tolist()
@@ -109,11 +153,11 @@ class IVScreener:
                 preview_count = min(20, len(missing_cap_symbols))
                 preview = ", ".join(missing_cap_symbols[:preview_count])
                 print(
-                    f"⚠ {missing_market_cap} symbols missing market cap; market-cap filter skipped for them"
+                    f"⚠ {missing_market_cap} symbols missing/non-applicable market cap; allowed through market-cap filter"
                 )
                 if preview:
                     print(
-                        f"   Missing market-cap symbols ({preview_count}/{len(missing_cap_symbols)}): {preview}"
+                        f"   Market-cap not applicable ({preview_count}/{len(missing_cap_symbols)}): {preview}"
                     )
                     if len(missing_cap_symbols) > preview_count:
                         print("   ...and more")
@@ -136,7 +180,7 @@ class IVScreener:
         df = df.sort_values("iv_rank", ascending=False)
 
         print(
-            f"✓ Found {len(df)} stocks after IV Rank, volume, market-cap, and halt filters"
+            f"✓ Found {len(df)} symbols after IV Rank, liquidity, market-cap, and halt filters"
         )
 
         return df
@@ -149,6 +193,10 @@ class IVScreener:
         Returns list of symbols
         """
         top_df = df.head(max_results)
+        if len(df) > max_results:
+            print(
+                f"⚠ Analyzing top {max_results} of {len(df)} screened symbols by IV Rank"
+            )
 
         return top_df["symbol"].tolist()
 

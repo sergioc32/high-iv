@@ -34,9 +34,13 @@ class PersistenceService:
         self,
         opportunities: list[dict[str, object]],
         market_open: bool,
+        filename_prefix: str = "opportunities",
     ) -> str:
         frame = pd.DataFrame(opportunities)
         preferred_order = [
+            "strategy_id",
+            "option_side",
+            "directional_bias",
             "symbol",
             "stock_price",
             "short_strike",
@@ -62,7 +66,7 @@ class PersistenceService:
         frame = frame[preferred_order + remaining_cols]
 
         suffix = "_indicative" if not market_open else ""
-        filename = f"opportunities_{time.strftime('%Y%m%d_%H%M%S')}{suffix}.csv"
+        filename = f"{filename_prefix}_{time.strftime('%Y%m%d_%H%M%S')}{suffix}.csv"
         self.opportunities_dir.mkdir(parents=True, exist_ok=True)
         filepath = self.opportunities_dir / filename
         frame.to_csv(filepath, index=False)

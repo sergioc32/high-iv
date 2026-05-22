@@ -12,10 +12,12 @@ Candidate-level, entry-time dataset. One row per evaluated spread candidate.
 - Entry-time only features.
 - No outcome-time fields in this dataset.
 - Append-only logging.
+- Strategy-aware schema evolution must not break the current daily put-spread run.
 
 ### Primary keys
 - run_id: string (format YYYYMMDD_HHMMSS)
 - snapshot_ts: ISO-8601 datetime string
+- strategy_id: string, required for multi-strategy rows, defaults to `put_credit_spread` for legacy put-only interpretation
 - symbol: underlying ticker
 - expiration_date: YYYY-MM-DD
 - short_strike: float
@@ -25,10 +27,21 @@ Candidate-level, entry-time dataset. One row per evaluated spread candidate.
 - run_id: string, required
 - snapshot_ts: string, required, ISO-8601
 - strategy_version: string, required for new rows, strategy engine label (for example v1_conservative, v2_dynamic)
+- strategy_id: string, optional for legacy rows and required for new multi-strategy rows, example values `put_credit_spread`, `call_credit_spread`
+- strategy_family: string, optional, example `credit_spread`
+- option_side: string, optional, example `put`, `call`
+- directional_bias: string, optional, example `bullish`, `bearish`, `neutral_to_bullish`, `neutral_to_bearish`
+- short_leg_type: string, optional, example `short_put`, `short_call`
+- long_leg_type: string, optional, example `long_put`, `long_call`
 - symbol: string, required
 - expiration_date: string, required, YYYY-MM-DD
 - dte: integer, required, days
 - stock_price: float, required, USD
+- year_high_price: float, optional, USD, current 52-week high from equity market snapshot
+- year_low_price: float, optional, USD, current 52-week low from equity market snapshot
+- range_position_52w: float, optional, unitless, stock position within the 52-week range in [0, 1]
+- distance_to_52w_high_pct: float, optional, unitless, pct distance from stock_price to year_high_price
+- distance_to_52w_low_pct: float, optional, unitless, pct distance from year_low_price to stock_price
 - short_strike: float, required, USD
 - long_strike: float, optional, USD
 - width: float, optional, USD
@@ -36,6 +49,10 @@ Candidate-level, entry-time dataset. One row per evaluated spread candidate.
 - credit_natural: float, optional, USD per contract, worst-case fill estimate
 - credit_expected: float, optional, USD per contract, modeled fill between natural and mid
 - fill_quality: float, optional, unitless, credit_expected / credit_mid when credit_mid > 0
+- fill_edge: float, optional, USD per contract, credit_expected - credit_natural
+- fill_edge_pct: float, optional, unitless, fill_edge / abs(credit_expected)
+- mid_capture_pct: float, optional, unitless, share of available natural-to-mid edge captured by credit_expected
+- fill_quality_score: float, optional, unitless, blended execution-quality heuristic from fill_quality, mid_capture_pct, and width quality
 - avg_width_pct: float, optional, unitless, average of short/long bid-ask width as pct of mid
 - mid_weight: float, optional, unitless, dynamic midpoint weight used in credit_expected
 - premium: float, optional, USD per contract
@@ -50,6 +67,11 @@ Candidate-level, entry-time dataset. One row per evaluated spread candidate.
 - skew_ratio: float, optional, short_iv / atm_iv
 - skew_diff: float, optional, short_iv - atm_iv
 - earnings_within_dte: string, optional, YYYY-MM-DD or blank
+- anchor_vs_shift_status: string, optional, {anchor, shifted}
+- shift_steps_from_anchor: integer, optional, negative = more OTM, positive = more ITM, zero = anchor
+- short_strike_shift: float, optional, USD shift from the anchor short strike
+- long_strike_shift: float, optional, USD shift from the anchor long strike
+- shift_direction: string, optional, {otm, anchor, itm}
 - candidate_status: enum, required, {selected, rejected}
 - selected: boolean, required
 - rejection_reason_primary: string, optional
@@ -58,6 +80,7 @@ Candidate-level, entry-time dataset. One row per evaluated spread candidate.
 ### Candidate status rules
 - selected=True => candidate_status must be selected.
 - selected=False => candidate_status must be rejected.
+- Within a strategy-aware run, exactly one selected candidate per `(run_id, strategy_id, symbol, expiration_date)` group is expected unless the symbol has no valid candidate for that strategy.
 - selected=False may include reasons such as:
   - selected_ranked_out
   - credit_natural_too_low
@@ -70,10 +93,24 @@ Candidate-level, entry-time dataset. One row per evaluated spread candidate.
   - long_leg_missing_quote
   - itm_or_atm
 
+### Strategy compatibility policy
+- Legacy put-only rows that predate multi-strategy logging may omit `strategy_id`, `strategy_family`, `option_side`, `directional_bias`, `short_leg_type`, and `long_leg_type`.
+- When these fields are missing for historical put rows, downstream analytics should interpret them as:
+  - `strategy_id = put_credit_spread`
+  - `strategy_family = credit_spread`
+  - `option_side = put`
+  - `directional_bias = bullish`
+  - `short_leg_type = short_put`
+  - `long_leg_type = long_put`
+- New rows written after multi-strategy support is introduced should populate these fields explicitly.
+- Schema rollout should preserve compatibility with the current daily put strategy until the call strategy is fully integrated.
+
 ### Row Reading Cheat Sheet
 Use one candidate row as five blocks:
 
 1. Identity: what spread was tested?
+- strategy_id
+- option_side
 - symbol
 - expiration_date
 - short_strike
@@ -84,12 +121,21 @@ Use one candidate row as five blocks:
 - stock_price
 - dte
 - earnings_within_dte
+- year_high_price
+- year_low_price
+- range_position_52w
+- distance_to_52w_high_pct
+- distance_to_52w_low_pct
 
 3. Trade economics: what does the spread pay and risk?
 - credit_mid: midpoint-based credit estimate
 - credit_natural: worst-case fill estimate
 - credit_expected: modeled credit used for economics and ranking
 - fill_quality: expected credit as a fraction of midpoint credit
+- fill_edge: absolute execution headroom above natural credit
+- fill_edge_pct: execution headroom normalized by expected credit
+- mid_capture_pct: how much of the natural-to-mid edge the expected fill captures
+- fill_quality_score: blended execution-quality heuristic for analytics and future ranking work
 - avg_width_pct: combined market width quality signal used in fill modeling
 - mid_weight: midpoint weight used to build expected credit
 - premium: credit received per contract in USD
@@ -98,14 +144,21 @@ Use one candidate row as five blocks:
 - premium_per_width: premium normalized by spread width
 
 4. Option quality and skew: how rich is the short leg?
-- short_delta: absolute delta of the short put
-- short_iv: IV of the short put
-- atm_iv: IV of the ATM put for the same expiration
+- short_delta: absolute delta of the short option
+- short_iv: IV of the short option
+- atm_iv: IV of the nearest ATM option for the same expiration and same option side
 - skew_ratio: short_iv / atm_iv
 - skew_diff: short_iv - atm_iv
 - ev_score: current ranking score, computed as (premium / max_loss) * (1 - short_delta)
 
-5. Decision trail: what happened to this candidate?
+5. Structure and shift context: how was this candidate generated?
+- anchor_vs_shift_status
+- shift_steps_from_anchor
+- short_strike_shift
+- long_strike_shift
+- shift_direction
+
+6. Decision trail: what happened to this candidate?
 - candidate_status
 - selected
 - rejection_reason_primary
@@ -134,7 +187,7 @@ Normalized analytics table joining candidate rows with trade lifecycle fields.
 - Outcome columns are for evaluation and reporting only.
 
 ### Entry-time feature columns
-- Identity and structure: run_id, snapshot_ts, symbol, expiration_date, dte, stock_price, short_strike, long_strike, width
+- Identity and structure: run_id, snapshot_ts, strategy_id, strategy_family, option_side, directional_bias, symbol, expiration_date, dte, stock_price, short_strike, long_strike, width
 - Spread metrics: credit_mid, credit_natural, credit_expected, fill_quality, avg_width_pct, mid_weight, premium, premium_per_width, max_profit, max_loss, risk_reward_ratio, ev_score
 - Option metrics: short_delta, short_iv, atm_iv, skew_ratio, skew_diff
 - Context: earnings_within_dte
@@ -144,7 +197,68 @@ Normalized analytics table joining candidate rows with trade lifecycle fields.
 - Match metadata: match_status, trade_status
 - Trade linkage: trade_id, entry_date
 - Open tracking: buying_power_used, current_mark, current_pnl, current_pnl_pct, dte_remaining, days_held, short_strike_breached, exit_signal
-- Closed outcomes: close_date, close_debit, fees_estimated, dte_at_close, profit_loss, profit_loss_pct, profit_pct_of_max, annualized_return, is_estimated_exit, exit_type, exit_notes
+- Closed outcomes: close_date, close_debit, close_debit_estimated, close_debit_actual, actual_exit_found, exit_price_source, close_fill_timestamp, close_order_id, match_confidence, fees_estimated, dte_at_close, profit_loss, profit_loss_pct, profit_pct_of_max, annualized_return, is_estimated_exit, exit_type, exit_notes
+
+---
+
+## Dataset: analysis/rejected_candidate_dataset.csv
+
+### Description
+Dense rejected-candidate analytics table derived from `opportunities/opportunity_candidates.csv`.
+
+### Purpose
+- analyze rejection behavior without trade/outcome sparsity
+- compare rejected candidates to selected sibling candidates
+- support filter tuning and near-miss review
+
+### Row grain
+- one row per rejected candidate
+
+### Source policy
+- base candidate columns come from `opportunities/opportunity_candidates.csv`
+- derived fields are added for tuning analysis only
+- strategy identity fields should be preserved from the candidate log before any derived rejection bucketing is applied
+
+### Derived fields
+- `rejection_bucket`
+- `delta_distance_from_target`
+- `moneyness_pct`
+- `premium_pct_of_width`
+- `width_pct_of_stock`
+- `sibling_selected_exists`
+- `same_group_candidate_count`
+- `same_group_liquidity_failure_count`
+- `same_group_ranked_out_exists`
+
+---
+
+## Dataset: analysis/executed_trade_dataset.csv
+
+### Description
+Dense executed-trade table derived from the reconciled reporting dataset plus candidate-log enrichment.
+
+### Purpose
+- analyze successful vs unsuccessful trades with one row per trade
+- support future training-dataset construction
+- separate trade analysis from the sparse mixed reporting table
+
+### Row grain
+- one row per unique executed trade
+
+### Source policy
+- trade linkage and outcome fields come from `analysis/analysis_dataset.csv`
+- candidate-only enrichment fields not present in the reporting dataset may be backfilled from `opportunities/opportunity_candidates.csv`
+- strategy identity fields must be preserved so executed-trade analysis can be segmented by strategy
+
+### Additional metadata
+- `entry_match_quality`
+- `label_quality_weight`
+
+### Label quality guidance
+- `1.0` for exact match with actual exit
+- `0.8` for adjusted match with actual exit
+- `0.5` for exact/adjusted match with estimated exit
+- `0.3` for trade-only
 
 ---
 
@@ -164,4 +278,5 @@ Symbol-level rejection counters per run. Diagnostic only.
 - Delta values are absolute and expected in [0, 1].
 - Ratios must be >= 0 when present.
 - Required identity fields must not be blank.
+- Historical rows may rely on documented default strategy interpretation during migration, but new multi-strategy rows should populate explicit strategy identity fields.
 - Schema changes require explicit versioned update to this contract.

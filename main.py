@@ -15,6 +15,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import config
 from api.tastytrade import TastytradeAPI
+from screener.call_spread_analyzer import CallSpreadAnalyzer
 from services.position_sync_service import PositionSyncService
 from services.screener_run_service import ScreenerRunService
 from services.snapshot_service import SnapshotService
@@ -137,6 +138,17 @@ def main() -> None:
         action="store_true",
         help="Create weekly snapshot of trades and config parameters",
     )
+    strategy_group = parser.add_mutually_exclusive_group()
+    strategy_group.add_argument(
+        "--puts-only",
+        action="store_true",
+        help="Analyze put credit spreads only",
+    )
+    strategy_group.add_argument(
+        "--calls-only",
+        action="store_true",
+        help="Analyze call credit spreads only",
+    )
     args = parser.parse_args()
 
     if args.clear_cache_all:
@@ -185,7 +197,16 @@ def main() -> None:
     market_open = is_market_open()
     _display_market_status(market_open)
 
-    screener_result = ScreenerRunService().run(
+    enabled_option_sides = ("put", "call")
+    if args.puts_only:
+        enabled_option_sides = ("put",)
+    elif args.calls_only:
+        enabled_option_sides = ("call",)
+
+    screener_result = ScreenerRunService(
+        call_analyzer_factory=CallSpreadAnalyzer,
+        enabled_option_sides=enabled_option_sides,
+    ).run(
         api=api,
         run_id=run_id,
         snapshot_ts=snapshot_ts,

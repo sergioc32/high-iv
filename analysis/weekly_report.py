@@ -235,6 +235,64 @@ def build_closed_trade_records(
     return records
 
 
+def build_close_reconciliation_summary(
+    closed_records: list[dict[str, object]],
+) -> dict[str, object]:
+    """Summarize actual-vs-estimated close coverage and outcomes."""
+    status_groups: dict[str, list[dict[str, object]]] = {
+        "actual": [],
+        "estimated": [],
+    }
+    source_counts: Counter[str] = Counter()
+
+    for record in closed_records:
+        row = record.get("row")
+        if not isinstance(row, dict):
+            continue
+
+        has_actual_exit = as_bool(str(row.get("actual_exit_found", "")))
+        status_key = "actual" if has_actual_exit else "estimated"
+        status_groups[status_key].append(record)
+
+        source = (row.get("exit_price_source") or "").strip()
+        if not source:
+            source = "estimated" if status_key == "estimated" else "actual_unspecified"
+        source_counts[source] += 1
+
+    total_records = len(closed_records)
+    status_rows: list[dict[str, object]] = []
+    for status_key in ("actual", "estimated"):
+        records = status_groups[status_key]
+        summary = summarize_performance(records)
+        count = len(records)
+        status_rows.append(
+            {
+                "status": status_key,
+                "count": count,
+                "share": safe_divide(float(count), float(total_records)),
+                "win_rate": summary.win_rate,
+                "avg_pnl": summary.avg_pnl,
+                "total_pnl": summary.total_pnl,
+            }
+        )
+
+    source_rows = [
+        {
+            "source": source,
+            "count": count,
+            "share": safe_divide(float(count), float(total_records)),
+        }
+        for source, count in source_counts.most_common()
+    ]
+
+    return {
+        "status_rows": status_rows,
+        "source_rows": source_rows,
+        "actual_count": len(status_groups["actual"]),
+        "estimated_count": len(status_groups["estimated"]),
+    }
+
+
 def max_drawdown_proxy(trade_points: list[tuple[date, float]]) -> float:
     """Compute peak-to-trough drawdown on cumulative pnl as a risk proxy."""
     cumulative = 0.0
@@ -324,8 +382,21 @@ def summarize_symbol_reasons(
     ]
     for row in rows:
         for column in counter_columns:
-            totals[column] += as_int(row.get(column, "0"))
+            normalized_reason = normalize_rejection_reason(column)
+            totals[normalized_reason] += as_int(row.get(column, "0"))
     return totals
+
+
+LEGACY_REASON_ALIASES: dict[str, str] = {
+    "credit_conservative": "credit_expected_too_low",
+    "delta_bounds": "delta_bounds_max",
+}
+
+
+def normalize_rejection_reason(reason: str) -> str:
+    """Normalize legacy reason labels to the current analytics taxonomy."""
+    raw = (reason or "").strip()
+    return LEGACY_REASON_ALIASES.get(raw, raw)
 
 
 def summarize_candidate_reasons(rows: list[dict[str, str]]) -> Counter[str]:
@@ -334,7 +405,8 @@ def summarize_candidate_reasons(rows: list[dict[str, str]]) -> Counter[str]:
     for row in rows:
         if (row.get("candidate_status") or "").strip().lower() != "rejected":
             continue
-        reason = (row.get("rejection_reason_primary") or "").strip() or "(blank)"
+        reason = normalize_rejection_reason(row.get("rejection_reason_primary") or "")
+        reason = reason or "(blank)"
         totals[reason] += 1
     return totals
 
@@ -390,6 +462,8 @@ def load_rejection_export(path: Path, key_column: str) -> list[dict[str, object]
     for row in rows:
         source = (row.get("source") or "").strip() or "(unknown)"
         key = (row.get(key_column) or "").strip() or "(blank)"
+        if key_column == "reason":
+            key = normalize_rejection_reason(key) or "(blank)"
         count = as_int(row.get("count", "0"))
         normalized.append({"source": source, "key": key, "count": count})
 
@@ -717,7 +791,9 @@ def build_rolling_rejection_reason_trends(
             if not row_date or row_date < cutoff:
                 continue
 
-            reason = (row.get("rejection_reason_primary") or "").strip()
+            reason = normalize_rejection_reason(
+                row.get("rejection_reason_primary") or ""
+            )
             if reason:
                 window_candidate_reasons[reason] += 1
 
@@ -760,7 +836,8 @@ def build_rolling_rejection_reason_trends(
 
                     count_val = as_int(value)
                     if count_val and count_val > 0:
-                        window_symbol_reasons[reason_col] += count_val
+                        normalized_reason = normalize_rejection_reason(reason_col)
+                        window_symbol_reasons[normalized_reason] += count_val
 
             # Add top symbol-level reasons for this window
             for reason, count in window_symbol_reasons.most_common(20):
@@ -819,7 +896,9 @@ def build_sensitivity_analysis(
     candidate_reason_freq = Counter()
     for row in candidate_rows:
         if (row.get("candidate_status") or "").strip().lower() == "rejected":
-            reason = (row.get("rejection_reason_primary") or "").strip()
+            reason = normalize_rejection_reason(
+                row.get("rejection_reason_primary") or ""
+            )
             if reason:
                 candidate_reason_freq[reason] += 1
 
@@ -1302,6 +1381,7 @@ def build_markdown_report(
     ranking_backtest_results: list[dict[str, object]],
     sensitivity_analysis_results: list[dict[str, object]],
     candidate_ranking_impact_results: list[dict[str, object]],
+    close_reconciliation_summary: dict[str, object],
     symbol_reason_totals: Counter[str],
     candidate_reason_totals: Counter[str],
     trend_rows: list[dict[str, object]],
@@ -1329,8 +1409,50 @@ def build_markdown_report(
         f"- Total pnl (closed trades): {overall.total_pnl:.2f}",
         f"- Max drawdown proxy: {overall.max_drawdown_proxy:.2f}",
         "",
-        "## Rolling Trend Metrics",
+        "## Close Price Reconciliation",
     ]
+
+    reconciliation_rows = [
+        [
+            str(item["status"]),
+            str(item["count"]),
+            f"{float(item['share']):.1%}",
+            f"{float(item['win_rate']):.2%}",
+            f"{float(item['avg_pnl']):.2f}",
+            f"{float(item['total_pnl']):.2f}",
+        ]
+        for item in close_reconciliation_summary["status_rows"]
+    ]
+    lines.extend(
+        markdown_table(
+            ["Exit Type", "Count", "Share", "Win Rate", "Avg PnL", "Total PnL"],
+            reconciliation_rows,
+        )
+    )
+
+    source_rows = close_reconciliation_summary["source_rows"]
+    if source_rows:
+        lines.extend(["", "### Exit Price Sources"])
+        lines.extend(
+            markdown_table(
+                ["Source", "Count", "Share"],
+                [
+                    [
+                        str(item["source"]),
+                        str(item["count"]),
+                        f"{float(item['share']):.1%}",
+                    ]
+                    for item in source_rows
+                ],
+            )
+        )
+
+    lines.extend(
+        [
+            "",
+            "## Rolling Trend Metrics",
+        ]
+    )
 
     if rolling_window_metrics:
         rolling_table_rows = [
@@ -1724,6 +1846,7 @@ def build_metrics_export_rows(
     recommendation_lines: list[str],
     recommendation_impact_rows: list[dict[str, str]],
     closed_records: list[dict[str, object]],
+    close_reconciliation_summary: dict[str, object],
 ) -> list[list[str]]:
     """Build flattened report metrics for machine-readable downstream use."""
     rows: list[list[str]] = []
@@ -1746,6 +1869,38 @@ def build_metrics_export_rows(
                 f"{metric_value}",
             ]
         )
+
+    for item in close_reconciliation_summary["status_rows"]:
+        status_label = str(item["status"])
+        for metric_name in (
+            "count",
+            "share",
+            "win_rate",
+            "avg_pnl",
+            "total_pnl",
+        ):
+            rows.append(
+                [
+                    "close_reconciliation",
+                    "status",
+                    status_label,
+                    metric_name,
+                    str(item[metric_name]),
+                ]
+            )
+
+    for item in close_reconciliation_summary["source_rows"]:
+        source_label = str(item["source"])
+        for metric_name in ("count", "share"):
+            rows.append(
+                [
+                    "close_reconciliation",
+                    "source",
+                    source_label,
+                    metric_name,
+                    str(item[metric_name]),
+                ]
+            )
 
     execution_alignment_summary = build_execution_alignment_summary(closed_records)
     alignment_counts: Counter[str] = execution_alignment_summary["alignment_counts"]
@@ -2269,6 +2424,7 @@ def main() -> None:
 
     closed_records = build_closed_trade_records(closed_trade_rows)
     overall = summarize_performance(closed_records)
+    close_reconciliation_summary = build_close_reconciliation_summary(closed_records)
 
     rolling_window_metrics = build_rolling_window_metrics(closed_records)
     rolling_rejection_trends = build_rolling_rejection_trends(
@@ -2381,6 +2537,7 @@ def main() -> None:
         ranking_backtest_results=ranking_backtest_results,
         sensitivity_analysis_results=sensitivity_analysis_results,
         candidate_ranking_impact_results=candidate_ranking_impact_results,
+        close_reconciliation_summary=close_reconciliation_summary,
         segment_rows=segment_rows,
         symbol_reason_totals=symbol_reason_totals,
         candidate_reason_totals=candidate_reason_totals,
@@ -2411,6 +2568,7 @@ def main() -> None:
         recommendation_lines=recommendation_lines,
         recommendation_impact_rows=recommendation_impact_rows,
         closed_records=closed_records,
+        close_reconciliation_summary=close_reconciliation_summary,
     )
     write_csv(csv_output_path, REPORT_CSV_COLUMNS, metric_rows)
 

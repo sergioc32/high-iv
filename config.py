@@ -1,143 +1,106 @@
 """
-Configuration file for options screener
+Configuration file for options screener.
 """
 
+# ---------------------------------------------------------------------------
+# Shared / general screener settings
+# ---------------------------------------------------------------------------
+
 # Screening criteria
-IV_RANK_THRESHOLD = 45  # Minimum IV Rank %
-MIN_STOCK_PRICE = (
-    25.00  # Minimum stock price ($25+ filters penny stocks and sub-$25 junk)
-)
-MIN_LIQUIDITY_VOLUME = 2_000_000  # Minimum daily volume if available
-MIN_UNDERLYING_VOLUME = 2_000_000  # Minimum underlying daily share volume
+IV_RANK_THRESHOLD = 40  # Minimum IV Rank %
+MIN_STOCK_PRICE = 25.00  # Minimum stock price ($25+ filters subscale names)
+# MIN_LIQUIDITY_VOLUME = 1_000_000  # Minimum daily volume if available
+MIN_UNDERLYING_VOLUME = 1_000_000  # Minimum underlying daily share volume
+MIN_TASTY_LIQUIDITY_RATING = 2  # Tasty options liquidity rating, 1=thin, 4=most liquid
 ENABLE_OI_FILTER = False  # Toggle to enable/disable open interest filtering
-MIN_MARKET_CAP = 1_000_000_000  # Minimum market cap in USD ($1B+ filters penny stocks)
-MIN_OPTION_OPEN_INTEREST_PER_LEG = 100  # Legacy single threshold (used as fallback)
+MIN_MARKET_CAP = 1_000_000_000  # Minimum market cap in USD
+MIN_OPTION_OPEN_INTEREST_PER_LEG = 100  # Legacy single threshold fallback
 MIN_OPTION_OPEN_INTEREST_SHORT_LEG = 25  # Minimum OI on short leg
 MIN_OPTION_OPEN_INTEREST_LONG_LEG = 5  # Minimum OI on long leg
-# Options criteria
+
+# Shared timing / structure defaults
 TARGET_DTE = 45  # Target days to expiration
-TARGET_DELTA = 0.16  # Target delta for short put (1 standard deviation)
-MIN_DELTA = 0.13  # Minimum acceptable delta for short put
-MAX_DELTA = 0.21  # Maximum acceptable delta for short put
-LONG_PUT_DELTA = 0.10  # Delta for long put (protection)
-
-# Skew optimization
-SKEW_WINDOW_OTM = 3  # Check N OTM (lower-delta/lower-strike) shifts from anchor
-SKEW_WINDOW_ITM = 1  # Check N ITM (higher-delta/higher-strike) shifts from anchor
-MIN_SCORE_IMPROVEMENT_PCT = 5  # Require 5% higher skew score to switch from anchor
-
-# Liquidity and fillability checks
-MIN_CREDIT_PER_WIDTH = (
-    0.08  # $8 per $1 width (3-wide=$24, 5-wide=$40) whitelist=0.08, general=0.12-0.15
-)
-MIN_NATURAL_CREDIT_PCT = 0.05  # Allow up to -5% of max_loss as natural floor; scales with width (e.g., 3-wide:-$15, 5-wide:-$25)
-# Dynamic credit weighting: bid/ask quality tiers (avg_width_pct breakpoints and mid-weight per tier)
-CREDIT_DYNAMIC_WIDTH_PCT_TIGHT = 0.10  # avg_width_pct < this → tight market
-CREDIT_DYNAMIC_WIDTH_PCT_OK = 0.20  # avg_width_pct < this → ok market
-CREDIT_DYNAMIC_WIDTH_PCT_WIDE = (
-    0.35  # avg_width_pct < this → wide market (else → very wide)
-)
-CREDIT_DYNAMIC_MID_WEIGHT_TIGHT = 0.85  # mid weight when market is tight
-CREDIT_DYNAMIC_MID_WEIGHT_OK = 0.75  # mid weight when market is ok
-CREDIT_DYNAMIC_MID_WEIGHT_MODERATE = 0.65  # mid weight when market is wide
-CREDIT_DYNAMIC_MID_WEIGHT_VERY_WIDE = 0.55  # mid weight when market is very wide
-# Asymmetric bid/ask thresholds - short leg stricter, long leg looser
-MAX_SHORT_LEG_BID_ASK_WIDTH = (
-    1.25  # Max absolute spread on short leg whitelist=1.50 max, general=1.25 max
-)
-MAX_SHORT_LEG_BID_ASK_WIDTH_PCT = (
-    0.30  # OR max 30% of mid price on short leg whitelist=30%, general=30%
-)
-MAX_LONG_LEG_BID_ASK_WIDTH = 3.00  # Max absolute spread on long leg (looser) whitelist=5.00 max, general=3.00 max
-MAX_LONG_LEG_BID_ASK_WIDTH_PCT = (
-    0.40  # OR max 50% of mid price (looser) on long leg whitelist=60%, general=40%
-)
-
-# Performance tuning
-CHAIN_FETCH_DELAY = 0.2  # Seconds to wait between chain fetches (0 to disable)
-OPTION_QUOTE_BATCH_SIZE = 400  # Max option symbols per quote batch call
-EQUITY_QUOTE_BATCH_SIZE = 200  # Max equity symbols per quote batch call
-
-# Spread configuration
+DTE_TOLERANCE = 14  # Accept expirations within +/- 14 days of target
 PREFERRED_SPREAD_WIDTH = 3  # Preferred spread width in dollars
-FALLBACK_SPREAD_WIDTH = 5  # Fallback if $3 strikes not available
+FALLBACK_SPREAD_WIDTH = 5  # Fallback if preferred width is unavailable
 MAX_STRIKE_INCREMENT = 10  # Max strike increment to accept when adapting widths
-MAX_RISK_REWARD_RATIO = 4.25  # Max loss / Premium received (prefer 4.0 or lower)
+MAX_RISK_REWARD_RATIO = 4.25  # Max loss / premium received
 
-# Exit strategy (for reference/future tracking)
-TARGET_EXIT_DTE = 21  # Target days to exit
-TARGET_PROFIT_PCT = 50  # Target profit percentage
+# Shared shift / anchor behavior
+SKEW_WINDOW_OTM = 3  # Check N OTM shifts from anchor
+SKEW_WINDOW_ITM = 1  # Check N ITM shifts from anchor
+MIN_SCORE_IMPROVEMENT_PCT = 2.5  # Require this % improvement to switch anchor
 
-# Sync positions exit signals
-EXIT_HARD_STOP_MULTIPLE = 2.0  # Close if debit >= multiple * credit received
-EXIT_STRUCTURAL_MULTIPLE = (
-    1.5  # Alert if short strike breached and debit >= multiple * credit
-)
-EXIT_GAMMA_RISK_DTE = 30  # Alert if short strike breached and DTE <= this
-ORDER_HISTORY_LOOKBACK_DAYS = 14  # Recent order window for closed-trade reconciliation
-ORDER_HISTORY_MAX_PAGES = 2  # Default page cap for lightweight recent order retrieval
+# Shared liquidity and fillability checks
+MIN_CREDIT_PER_WIDTH = 0.08  # $8 per $1 width (3-wide=$24, 5-wide=$40)
+MIN_NATURAL_CREDIT_PCT = 0.05  # Allow a small negative natural floor by width
 
-# Display settings
-MAX_SCREENING_RESULTS = 250  # Max stocks to show after IV screening
-MAX_FINAL_RESULTS = 25  # Max trade opportunities to display
-AUTO_SAVE_CSV = True  # Automatically save results to CSV file
+# Dynamic credit weighting by bid/ask quality
+CREDIT_DYNAMIC_WIDTH_PCT_TIGHT = 0.10  # avg_width_pct < this -> tight market
+CREDIT_DYNAMIC_WIDTH_PCT_OK = 0.20  # avg_width_pct < this -> ok market
+CREDIT_DYNAMIC_WIDTH_PCT_WIDE = 0.35  # avg_width_pct < this -> wide market
+CREDIT_DYNAMIC_MID_WEIGHT_TIGHT = 0.85  # Mid weight when market is tight
+CREDIT_DYNAMIC_MID_WEIGHT_OK = 0.75  # Mid weight when market is ok
+CREDIT_DYNAMIC_MID_WEIGHT_MODERATE = 0.65  # Mid weight when market is wide
+CREDIT_DYNAMIC_MID_WEIGHT_VERY_WIDE = 0.55  # Mid weight when market is very wide
 
-# DTE tolerance for finding expirations
-DTE_TOLERANCE = 14  # Will accept expirations within +/- 14 days of target
+# Asymmetric bid/ask thresholds
+MAX_SHORT_LEG_BID_ASK_WIDTH = 1.25  # Max absolute spread on short leg
+MAX_SHORT_LEG_BID_ASK_WIDTH_PCT = 0.25  # Or max pct of mid on short leg
+MAX_LONG_LEG_BID_ASK_WIDTH = 3.00  # Max absolute spread on long leg
+MAX_LONG_LEG_BID_ASK_WIDTH_PCT = 0.40  # Or max pct of mid on long leg
 
-# Strategy version labeling for analysis/backtesting continuity.
-# Bump STRATEGY_VERSION whenever entry logic meaningfully changes.
-STRATEGY_VERSION = "v2_dynamic"
-LEGACY_STRATEGY_VERSION = "v1_conservative"
-STRATEGY_VERSION_CUTOFF_DATE = "2026-04-09"
-
-# Manual exclusions (useful for temporarily skipping symbols under restrictions)
-EXCLUDE_SYMBOLS = []
-
-# Caching configuration
-CACHE_DIR = "cache"  # Relative to project root
-# TTLs in seconds
-CACHE_TTL_SESSION = 20 * 3600  # 20 hours for session token
-CACHE_TTL_WATCHLIST = 24 * 3600  # 24 hours for watchlist symbols
-CACHE_TTL_EXPIRATIONS = 48 * 3600  # 48 hours for expirations
-CACHE_TTL_OPTION_CHAIN = 24 * 3600  # 24 hours for chains by expiration
-CACHE_TTL_MARKET_METRICS = 30 * 60  # 30 minutes for market metrics
-CACHE_TTL_QUOTES = 5 * 60  # 5 minutes for equity quotes
-CACHE_TTL_OPTION_QUOTES = 5 * 60  # 5 minutes for option quotes
-
-# Watchlists to screen
-WATCHLISTS = {
-    "sp500": "S&P 500",  # Tastytrade watchlist name for S&P 500
-    "etfs": "Liquid ETFs",  # Major liquid ETFs
-    "nasdaq100": "NASDAQ 100",  # Tastytrade watchlist name for Nasdaq 100
-    "high_options_volume": "High Options Volume",  # Tastytrade watchlist for high IV ETFs
-    "tasty_ivr": "tasty IVR",  # Tastytrade watchlist for high IV stocks
-}
-
-# Fallback list if the Liquid ETFs watchlist is unavailable
-ETF_FALLBACK = ["SPY", "QQQ", "IWM", "DIA", "XLF", "XLE", "XLK", "XLV"]
 
 # ---------------------------------------------------------------------------
-# Ranking engine v2 — asymmetric delta scoring, skew integration, soft mode
-# Option B "balanced/gradual" calibration — adjust these to retune without
-# touching engine code.
+# Put credit spread settings
 # ---------------------------------------------------------------------------
-RANKING_MODE = (
-    "soft"  # "soft": ceiling defined but not enforced; "strict": hard ceiling
-)
+
+PUT_TARGET_DELTA = 0.16  # Target short-put delta (absolute)
+PUT_MIN_DELTA = 0.13  # Minimum acceptable short-put delta
+PUT_MAX_DELTA = 0.21  # Maximum acceptable short-put delta
+PUT_LONG_DELTA = 0.10  # Long-put protection delta
+
+
+# ---------------------------------------------------------------------------
+# Call credit spread settings
+# ---------------------------------------------------------------------------
+
+CALL_TARGET_DELTA = 0.16  # Target short-call delta (absolute)
+CALL_MIN_DELTA = 0.10  # Minimum acceptable short-call delta
+CALL_MAX_DELTA = 0.20  # Maximum acceptable short-call delta
+LONG_CALL_DELTA = 0.08  # Long-call protection delta
+CALL_MAX_RISK_REWARD_RATIO = 5.0  # Max loss / premium received for calls
+CALL_MIN_CREDIT_PER_WIDTH = 0.06  # Lower premium-per-width floor for calls
+CALL_MIN_NATURAL_CREDIT_PCT = 0.07  # Slightly looser natural-credit floor for calls
+
+# ---------------------------------------------------------------------------
+# Backward-compatible aliases for the current put-spread implementation
+# ---------------------------------------------------------------------------
+
+# Keep these aliases while the codebase still assumes a single put strategy.
+TARGET_DELTA = PUT_TARGET_DELTA
+MIN_DELTA = PUT_MIN_DELTA
+MAX_DELTA = PUT_MAX_DELTA
+LONG_PUT_DELTA = PUT_LONG_DELTA
+
+
+# ---------------------------------------------------------------------------
+# Ranking settings
+# ---------------------------------------------------------------------------
+
+# Ranking engine v2: asymmetric delta scoring, skew integration, soft mode
+RANKING_MODE = "soft"  # "soft" or "strict"
 
 # Delta preference breakpoints
 RANK_DELTA_TARGET = 0.16  # Optimal short-delta anchor
 RANK_DELTA_BONUS_FLOOR = 0.13  # At or below this: full OTM bonus applies
-RANK_DELTA_PENALTY_START = 0.16  # Above this: penalty begins (same as TARGET)
-RANK_DELTA_PENALTY_STEEP = 0.185  # Above this: penalty rate steepens significantly
-RANK_DELTA_HARD_CEILING = 0.19  # Defined for future strict mode; ignored in soft mode
+RANK_DELTA_PENALTY_START = 0.16  # Above this: penalty begins
+RANK_DELTA_PENALTY_STEEP = 0.185  # Above this: penalty rate steepens
+RANK_DELTA_HARD_CEILING = 0.19  # Defined for future strict mode
 
 # Delta score magnitude controls
-RANK_DELTA_BONUS_MAX = (
-    0.05  # Additive bonus at RANK_DELTA_BONUS_FLOOR (score up to 1.05)
-)
-RANK_DELTA_PENALTY_MAX = 0.40  # Total deduction from 1.0 at RANK_DELTA_PENALTY_STEEP
+RANK_DELTA_BONUS_MAX = 0.05  # Additive bonus at RANK_DELTA_BONUS_FLOOR
+RANK_DELTA_PENALTY_MAX = 0.40  # Total deduction at RANK_DELTA_PENALTY_STEEP
 
 # Component weights (must sum to 1.0)
 RANK_WEIGHT_DELTA = 0.38
@@ -146,25 +109,119 @@ RANK_WEIGHT_EV = 0.27
 RANK_WEIGHT_LIQUIDITY = 0.15
 
 # Skew component sub-weights (must sum to 1.0)
-RANK_SKEW_RATIO_WEIGHT = 0.55  # Weight for skew_ratio percentile within skew component
-RANK_SKEW_DIFF_WEIGHT = 0.45  # Weight for skew_diff percentile within skew component
+RANK_SKEW_RATIO_WEIGHT = 0.55
+RANK_SKEW_DIFF_WEIGHT = 0.45
 
 # Directional adjustment multipliers applied to base score
-RANK_ITM_PENALTY_MULTIPLIER = 0.80  # Applied when delta > RANK_DELTA_PENALTY_STEEP
-RANK_OTM_BONUS_MULTIPLIER = 1.02  # Applied when delta < RANK_DELTA_TARGET
+RANK_ITM_PENALTY_MULTIPLIER = 0.80
+RANK_OTM_BONUS_MULTIPLIER = 1.02
+
+# Put ranking profile defaults
+PUT_RANK_DELTA_TARGET = RANK_DELTA_TARGET
+PUT_RANK_DELTA_BONUS_FLOOR = RANK_DELTA_BONUS_FLOOR
+PUT_RANK_DELTA_PENALTY_START = RANK_DELTA_PENALTY_START
+PUT_RANK_DELTA_PENALTY_STEEP = RANK_DELTA_PENALTY_STEEP
+PUT_RANK_DELTA_HARD_CEILING = RANK_DELTA_HARD_CEILING
+PUT_RANK_DELTA_BONUS_MAX = RANK_DELTA_BONUS_MAX
+PUT_RANK_DELTA_PENALTY_MAX = RANK_DELTA_PENALTY_MAX
+PUT_RANK_WEIGHT_DELTA = RANK_WEIGHT_DELTA
+PUT_RANK_WEIGHT_SKEW = RANK_WEIGHT_SKEW
+PUT_RANK_WEIGHT_EV = RANK_WEIGHT_EV
+PUT_RANK_WEIGHT_LIQUIDITY = RANK_WEIGHT_LIQUIDITY
+PUT_RANK_WEIGHT_EXTENSION = 0.0
+PUT_RANK_SKEW_RATIO_WEIGHT = RANK_SKEW_RATIO_WEIGHT
+PUT_RANK_SKEW_DIFF_WEIGHT = RANK_SKEW_DIFF_WEIGHT
+PUT_RANK_ITM_PENALTY_MULTIPLIER = RANK_ITM_PENALTY_MULTIPLIER
+PUT_RANK_OTM_BONUS_MULTIPLIER = RANK_OTM_BONUS_MULTIPLIER
+
+# Call ranking profile defaults
+CALL_RANK_DELTA_TARGET = CALL_TARGET_DELTA
+CALL_RANK_DELTA_BONUS_FLOOR = 0.13
+CALL_RANK_DELTA_PENALTY_START = CALL_TARGET_DELTA
+CALL_RANK_DELTA_PENALTY_STEEP = 0.19
+CALL_RANK_DELTA_HARD_CEILING = 0.22
+CALL_RANK_DELTA_BONUS_MAX = 0.03
+CALL_RANK_DELTA_PENALTY_MAX = 0.32
+CALL_RANK_WEIGHT_DELTA = 0.26
+CALL_RANK_WEIGHT_SKEW = 0.14
+CALL_RANK_WEIGHT_EV = 0.20
+CALL_RANK_WEIGHT_LIQUIDITY = 0.14
+CALL_RANK_WEIGHT_EXTENSION = 0.26
+CALL_RANK_SKEW_RATIO_WEIGHT = 0.50
+CALL_RANK_SKEW_DIFF_WEIGHT = 0.50
+CALL_RANK_ITM_PENALTY_MULTIPLIER = 0.86
+CALL_RANK_OTM_BONUS_MULTIPLIER = 1.00
 
 # Earnings-event scoring impact
-# Applied as a score multiplier when earnings date is present in earnings_within_dte.
-RANK_EARNINGS_POST_EXIT_MULTIPLIER = (
-    0.98  # Minor penalty when earnings is likely after planned exit
-)
-RANK_EARNINGS_PRE_EXIT_MULTIPLIER = (
-    0.92  # Moderate penalty when earnings is likely before planned exit
-)
-RANK_EARNINGS_NEAR_TERM_MULTIPLIER = (
-    0.85  # Stronger penalty when earnings is very near term
-)
-RANK_EARNINGS_NEAR_TERM_DAYS = 10  # Near-term threshold in calendar days
+RANK_EARNINGS_POST_EXIT_MULTIPLIER = 0.98
+RANK_EARNINGS_PRE_EXIT_MULTIPLIER = 0.92
+RANK_EARNINGS_NEAR_TERM_MULTIPLIER = 0.85
+RANK_EARNINGS_NEAR_TERM_DAYS = 10
+
+
+# ---------------------------------------------------------------------------
+# Runtime / persistence / display settings
+# ---------------------------------------------------------------------------
+
+# Performance tuning
+CHAIN_FETCH_DELAY = 0.2  # Seconds to wait between chain fetches
+OPTION_QUOTE_BATCH_SIZE = 400  # Max option symbols per quote batch call
+EQUITY_QUOTE_BATCH_SIZE = 200  # Max equity symbols per quote batch call
+OPTION_QUOTE_EXPECTED_MOVE_MULTIPLIER = 1.75  # Quote through this many EMs OTM
+OPTION_QUOTE_ATM_BUFFER_EXPECTED_MOVE = 0.25  # Quote this many EMs through ATM
+PUT_QUOTE_MIN_MONEYNESS = 0.60  # Safety rail: lowest put strike as pct of spot
+PUT_QUOTE_MAX_MONEYNESS = 1.05  # Safety rail: highest put strike as pct of spot
+CALL_QUOTE_MIN_MONEYNESS = 0.95  # Safety rail: lowest call strike as pct of spot
+CALL_QUOTE_MAX_MONEYNESS = 1.40  # Safety rail: highest call strike as pct of spot
+
+# Exit strategy (for reference/future tracking)
+TARGET_EXIT_DTE = 21  # Target days to exit
+TARGET_PROFIT_PCT = 50  # Target profit percentage
+
+# Sync positions exit signals
+EXIT_HARD_STOP_MULTIPLE = 2.0  # Close if debit >= multiple * credit received
+EXIT_STRUCTURAL_MULTIPLE = 1.5  # Alert if short strike breached and debit elevated
+EXIT_GAMMA_RISK_DTE = 30  # Alert if short strike breached and DTE <= this
+ORDER_HISTORY_LOOKBACK_DAYS = 14  # Recent order window for reconciliation
+ORDER_HISTORY_MAX_PAGES = 2  # Default page cap for recent order retrieval
+
+# Display / persistence
+MAX_SCREENING_RESULTS = 400  # Max stocks to show after IV screening
+MAX_FINAL_RESULTS = 30  # Max trade opportunities to display
+AUTO_SAVE_CSV = True  # Automatically save results to CSV file
+
+# Strategy version labeling for analysis/backtesting continuity
+STRATEGY_VERSION = "v2_dynamic"
+LEGACY_STRATEGY_VERSION = "v1_conservative"
+STRATEGY_VERSION_CUTOFF_DATE = "2026-04-09"
+
+
+# ---------------------------------------------------------------------------
+# Cache settings
+# ---------------------------------------------------------------------------
+
+CACHE_DIR = "cache"  # Relative to project root
+CACHE_TTL_SESSION = 20 * 3600  # 20 hours for session token
+CACHE_TTL_WATCHLIST = 24 * 3600  # 24 hours for watchlist symbols
+CACHE_TTL_EXPIRATIONS = 48 * 3600  # 48 hours for expirations
+CACHE_TTL_OPTION_CHAIN = 24 * 3600  # 24 hours for chains by expiration
+CACHE_TTL_MARKET_METRICS = 30 * 60  # 30 minutes for market metrics
+CACHE_TTL_QUOTES = 5 * 60  # 5 minutes for equity quotes
+CACHE_TTL_OPTION_QUOTES = 5 * 60  # 5 minutes for option quotes
+
+
+# ---------------------------------------------------------------------------
+# Watchlists / account
+# ---------------------------------------------------------------------------
+
+WATCHLISTS = {
+    "sp500": "S&P 500",
+    "etfs": "Liquid ETFs",
+    "nasdaq100": "NASDAQ 100",
+    "high_options_volume": "High Options Volume",
+    "tasty_ivr": "tasty IVR",
+}
+
 
 # Account configuration
 TASTYTRADE_ACCOUNT_NUMBER = "5WU44666"  # Update with your account number
