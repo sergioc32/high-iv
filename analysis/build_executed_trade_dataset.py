@@ -186,10 +186,19 @@ def candidate_backfill_lookup_key(
 
 
 def run_id_from_daily_opportunity_file(filename: str) -> str:
-    """Extract the originating run id from an opportunities_*.csv filename."""
+    """Extract the originating run id from a daily opportunities CSV filename."""
+    # Match filenames like:
+    # - opportunities_20240101_120000.csv
+    # - put_spread_opportunities_20240101_120000.csv
+    # - call_spread_opportunities_20240101_120000.csv
+    # - any_other_strategy_opportunities_20240101_120000.csv
+    #
+    # Restrict matching to the basename so directory components do not affect parsing.
+    basename = Path(filename or "").name
     match = re.search(
-        r"(?:put_spread_)?opportunities_(\d{8}_\d{6})",
-        filename or "",
+        r"(?:[a-z0-9]+_)*opportunities_(\d{8}_\d{6})(?:\.csv)?$",
+        basename,
+        re.IGNORECASE,
     )
     return match.group(1) if match else ""
 
