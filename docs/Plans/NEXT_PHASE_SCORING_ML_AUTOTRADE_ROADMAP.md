@@ -24,6 +24,10 @@ Keep [CALL_CREDIT_SPREAD_IMPLEMENTATION_ROADMAP.md](/abs/path/c:/Users/sergi/dev
 
 Use this document as the active roadmap for the next phase.
 
+For the broader long-term direction behind these phases, also keep
+[LONG_TERM_TRADE_SCORE_VISION.md](/abs/path/c:/Users/sergi/development/highIV/docs/Plans/LONG_TERM_TRADE_SCORE_VISION.md)
+as the north-star document for what the system is ultimately trying to achieve.
+
 Reasoning:
 
 - the call-spread roadmap is now mostly an implementation history plus a few remaining Milestone 5 and 6 items
@@ -38,9 +42,29 @@ As of this roadmap:
 - candidate logs and downstream analytics are strategy-aware
 - call spreads have their own ranking profile
 - the current `strategy_alignment_score` exists and is useful, but it is still heuristic
-- market-context strategy identification is planned but not fully implemented
+- market-context strategy identification is now implemented in `identify_only` mode
+- selector fields now flow through live outputs, `analysis_dataset`, `executed_trade_dataset`, and selector-aware reporting
+- alignment score versioning and component breakdowns are now persisted in live outputs
 - ML modeling is not yet the live decision-maker
 - trading remains manual rather than automated
+
+### Completed So Far
+
+- [x] put/call strategy runtime and output separation
+- [x] strategy-aware candidate logging and analytics contracts
+- [x] call-specific ranking profile
+- [x] alignment score hardening and versioning
+- [x] identify-only selector implementation
+- [x] selector persistence into forward analytics datasets
+- [x] selector-aware weekly and trade-outcome reporting
+
+### Still Ahead
+
+- [ ] selector-driven historical review with enough post-rollout history to be meaningful
+- [ ] formal `model_score`
+- [ ] formal combined `trade_score`
+- [ ] decision-policy thresholds
+- [ ] automation and broker execution controls
 
 ## Target Score Architecture
 
@@ -130,11 +154,11 @@ This becomes the first real strategy-choice layer and eventually an input into m
 
 ### What Is Missing
 
-- market regime taxonomy is not finalized
-- symbol extension taxonomy is not finalized
-- selector thresholds are not defined in config
-- selector fields are not yet fully persisted into forward outputs
-- no selector review loop exists yet in weekly reporting
+- selector history is still sparse because rollout is recent
+- weekly and trade-outcome selector sections are informational but still in rollout mode
+- selector-aware recommendations are not implemented yet
+- selector-era closed-trade history is not large enough yet to validate usefulness
+- always-review symbol handling for strategic names like `SPY`, `QQQ`, and `IWM` is not implemented yet
 
 ### Decision Notes From Current Market Behavior
 
@@ -145,12 +169,16 @@ This becomes the first real strategy-choice layer and eventually an input into m
 
 ### Implementation Plan
 
-1. Finalize market regime logic using `SPY` and `QQQ`
-2. Finalize symbol extension buckets
-3. Implement `services/strategy_selector.py`
-4. Annotate live opportunities with selector fields
-5. Display `put_selector_score` and `call_selector_score` in the CLI
-6. Persist selector fields in new outputs going forward
+1. Finalize market regime logic using `SPY` and `QQQ` `[x]`
+2. Finalize symbol extension buckets `[x]`
+3. Implement `services/strategy_selector.py` `[x]`
+4. Annotate live opportunities with selector fields `[x]`
+5. Display `put_selector_score` and `call_selector_score` in the CLI `[x]`
+6. Persist selector fields in new outputs going forward `[x]`
+7. Carry selector fields into `analysis_dataset` / `executed_trade_dataset` `[x]`
+8. Add selector-aware weekly and trade-outcome review sections `[x]`
+9. Add selector-aware recommendation logic once enough selector-era history exists `[ ]`
+10. Add an always-review universe for strategic symbols so names like `SPY`, `QQQ`, and `IWM` are analyzed even when they do not naturally surface in the main funnel `[ ]`
 
 ### Core Output Fields
 
@@ -386,10 +414,11 @@ Notes:
 
 ### Exit Criteria
 
-- every run has explainable market context
-- every symbol with valid opportunities can show both selector scores
-- no strategy is filtered yet
-- selector fields can be analyzed historically going forward
+- [x] every run has explainable market context
+- [x] every symbol with valid opportunities can show both selector scores
+- [x] no strategy is filtered yet
+- [x] selector fields can be analyzed historically going forward
+- [ ] enough selector-era history exists for meaningful selector-vs-outcome review
 
 ---
 
@@ -405,11 +434,11 @@ Without reliable labels and decision-time features, any model or improved trade 
 
 ### What Is Missing
 
-- stronger joins between candidate, selected, executed, and closed-trade data
-- execution-quality fields captured consistently
+- selector-era history is still shallow in the closed-trade layer
+- execution-quality fields are only partially populated across older history
 - realized outcome labels defined clearly
-- strategy-aware training datasets for both puts and calls
-- versioning of scoring and strategy behavior over time
+- strategy-aware training datasets for both puts and calls need continued growth
+- score-version history exists, but model-version history does not yet
 
 ### Required Dataset Layers
 
@@ -455,17 +484,17 @@ Without reliable labels and decision-time features, any model or improved trade 
 
 ### Implementation Plan
 
-1. Audit current analysis datasets for missing decision-time fields
-2. Expand executed-trade and closed-trade joins
-3. Define canonical labels for ML and score evaluation
-4. Persist strategy-aware training features
-5. Add weekly and monthly validation reports on data completeness
+1. Audit current analysis datasets for missing decision-time fields `[x]`
+2. Expand executed-trade and closed-trade joins `[x]`
+3. Define canonical labels for ML and score evaluation `[ ]`
+4. Persist strategy-aware training features `[partial]`
+5. Add weekly and monthly validation reports on data completeness `[partial]`
 
 ### Exit Criteria
 
-- selected and executed trades can be tied back to their original candidate context
+- [x] selected and executed trades can be tied back to their original candidate context
 - outcome labels are defined and reproducible
-- puts and calls can be analyzed separately without schema drift
+- [x] puts and calls can be analyzed separately without schema drift
 
 ---
 
@@ -507,12 +536,12 @@ The current `strategy_alignment_score` is useful, but it is carrying too much re
 
 ### Implementation Plan
 
-1. Freeze the role of `strategy_alignment_score`
-2. Define selector-score scale and interpretation
-3. Define the first `model_score` target
-4. Define the first `trade_score` formula
-5. Add reporting that shows score components side by side
-6. Backtest score behavior against realized trade outcomes
+1. Freeze the role of `strategy_alignment_score` `[x]`
+2. Define selector-score scale and interpretation `[x]`
+3. Define the first `model_score` target `[ ]`
+4. Define the first `trade_score` formula `[ ]`
+5. Add reporting that shows score components side by side `[partial]`
+6. Backtest score behavior against realized trade outcomes `[ ]`
 
 ### Suggested Score Bands
 
@@ -525,8 +554,8 @@ Example only and subject to later tuning:
 
 ### Exit Criteria
 
-- each score has a clear purpose
-- score components can be inspected independently
+- [x] each score has a clear purpose
+- [x] score components can be inspected independently
 - the final `trade_score` is more predictive than alignment score alone
 
 ### First Implementation Slice: Alignment Score Hardening
@@ -575,10 +604,10 @@ Before implementing selector scoring or model scoring, the first score-architect
 
 #### First Implementation Deliverables
 
-- `ALIGNMENT_SCORE_VERSION` config value
-- alignment-version field in relevant outputs
-- component-level alignment score fields persisted in the live opportunity flow
-- tests covering score version propagation and component persistence
+- `ALIGNMENT_SCORE_VERSION` config value `[x]`
+- alignment-version field in relevant outputs `[x]`
+- component-level alignment score fields persisted in the live opportunity flow `[x]`
+- tests covering score version propagation and component persistence `[x]`
 
 #### Non-Goals For This Slice
 
@@ -615,18 +644,312 @@ ML should help us move from good heuristics to measurable predictive edge, but o
 
 ### Candidate Model Targets
 
+Primary first target:
+
+- expected return on risk
+
+Secondary companion targets:
+
 - probability of profit
 - probability of reaching target before stop
-- expected return on risk
 - expected PnL
+
+### Locked First `model_score` Decision
+
+The first live `model_score` should be based on:
+
+- `expected_return_on_risk`
+
+Reasoning:
+
+- it maps well to spread trading decisions
+- it is more informative than a simple win/loss label
+- it connects naturally to later `trade_score` construction
+- it lets us compare trades with different credits and widths on a normalized basis
+
+The first `model_score` should not try to replace the heuristic score stack.
+Instead, it should become one additional component alongside:
+
+- `strategy_alignment_score`
+- `put_selector_score` / `call_selector_score`
+- execution-quality and risk-control checks
+
+### First Modeling Shape
+
+Start with a strategy-specific regression-style prediction target:
+
+- put model predicts expected return on risk for put credit spreads
+- call model predicts expected return on risk for call credit spreads
+
+Then derive a normalized `model_score` from that prediction for downstream use.
+
+Recommended first outputs:
+
+- `predicted_return_on_risk`
+- `model_score`
+- `model_score_version`
+
+Recommended auxiliary outputs for later comparison:
+
+- `predicted_pop`
+- `predicted_hit_target_prob`
+
+### Canonical First Label Definition
+
+Use realized return on risk as the primary label:
+
+- `realized_return_on_risk = realized_pnl / max_loss_at_entry`
+
+Canonical denominator decision:
+
+- use `max_loss_at_entry` as the first and only denominator for the initial model target
+- do not mix `buying_power_used` and `max_loss_at_entry`
+- do not fall back between multiple risk denominators in the first model version
+
+Reasoning:
+
+- `max_loss_at_entry` is more aligned with defined-risk spread structure
+- it should be more historically consistent than broker/account-specific buying power usage
+- one canonical denominator keeps the target easier to interpret and trust
+- `buying_power_used` can remain available later as a separate execution or account-context feature if needed
+
+Label handling notes:
+
+- closed trades only for supervised training
+- keep open trades out of the first training target
+- preserve sign, so losing trades remain negative
+- wins and losses should both stay in the regression target rather than being clipped
+
+### First Feature Groups
+
+The first model should use only decision-time or entry-time fields, not future leakage.
+
+Core candidate-quality features:
+
+- `short_delta`
+- `dte`
+- `width`
+- `premium`
+- `premium_per_width`
+- `risk_reward_ratio`
+- `ev_score`
+- `short_iv`
+- `atm_iv`
+- `skew_ratio`
+- `skew_diff`
+- `fill_quality`
+- `fill_quality_score`
+- `avg_width_pct`
+- `credit_mid`
+- `credit_natural`
+- `credit_expected`
+
+Context features:
+
+- `range_position_52w`
+- `distance_to_52w_high_pct`
+- `distance_to_52w_low_pct`
+- `market_regime_summary`
+- `symbol_extension_bucket`
+- `put_selector_score`
+- `call_selector_score`
+- `selector_preferred_strategy`
+- `selector_confidence`
+- `earnings_within_dte`
+- `selector_earnings_stage`
+- `selector_earnings_penalty`
+
+Versioning and regime tracking:
+
+- `strategy_id`
+- `strategy_version`
+- `alignment_score_version`
+- `selector_version`
+
+Optional early exclusions:
+
+- exclude rows with very poor label quality
+- exclude rows with missing core fields required for the first model
+
+### First-Pass ML Dataset Definition
+
+This section defines the initial training dataset contract for the first `model_score`.
+
+#### Training-Row Inclusion Rules
+
+Include only rows that meet all of the following:
+
+- closed trades only
+- valid `profit_loss`
+- valid `max_loss_at_entry`
+- tied back to reviewed trade context
+- sufficient entry-time feature coverage for the first model
+
+Recommended first inclusion statuses:
+
+- include:
+  - `exact_match`
+  - `adjusted_match`
+- exclude initially:
+  - `trade_only`
+
+Reasoning:
+
+- the first model should prioritize training-label trust over dataset size
+- `trade_only` rows can still be useful later, but they are weaker for the first supervised model because their decision-time context is less certain
+
+#### Canonical Input Rule
+
+Use only information that was known at trade entry.
+
+This means:
+
+- include decision-time and entry-time context
+- do not include future-outcome fields as predictors
+- do not include fields that depend on how the trade later behaved
+
+Examples of fields that should stay out of the feature set:
+
+- `days_held`
+- `profit_loss`
+- `annualized_return`
+- `profit_pct_of_max`
+- any exit-time or post-entry lifecycle field
+
+#### Primary Label
+
+The first supervised target should be:
+
+- `realized_return_on_risk = realized_pnl / max_loss_at_entry`
+
+This is the main quantity the first `model_score` should learn to predict.
+
+#### Secondary Evaluation Metrics
+
+The first model should still be judged with time-aware and practical trade metrics, even though those are not input features.
+
+Track at least:
+
+- `days_held`
+- `annualized_return`
+- `profit_pct_of_max`
+
+Reasoning:
+
+- a trade that earns the same return in fewer days is more useful
+- time-to-outcome matters operationally even if it is not the first prediction target
+- these metrics help us see whether the model is ranking efficient trades or just eventual winners
+
+#### First Derived Distance Features
+
+Include strike-distance context where available or easily derivable:
+
+- `distance_to_short_strike_points`
+- `distance_to_short_strike_pct`
+- `distance_to_short_strike_std` if it can be computed cleanly from existing data
+
+Reasoning:
+
+- these help normalize how aggressive or conservative the entry was
+- they reflect how far the short strike sat from current price in more meaningful ways than raw strike alone
+
+#### Future Feature Backlog
+
+These are good candidates for later expansion but should not block the first model:
+
+- same-day price change %
+- whether the stock was red or green at entry
+- intraday extension / mean-reversion context
+- realized move vs expected move
+- richer standard-deviation distance context if not already available
+
+Reasoning:
+
+- these could capture entry-timing edge that matters in practice
+- they are useful ideas, but the first model should start with the strong feature set already available rather than waiting for perfect context
+
+#### First Modeling Philosophy
+
+Keep the first model intentionally simple and trustworthy:
+
+- prioritize clean labels over maximum row count
+- prioritize understandable features over feature sprawl
+- use secondary evaluation to judge trade efficiency, not just raw return
+- grow feature richness after the first baseline is stable
+
+### First Modeling Constraints
+
+- start with separate put and call models
+- do not train one unified model yet
+- require closed trades only
+- use label-quality weighting when available
+- compare against a simple baseline before trusting the model
+- avoid using fields that were computed after trade entry
+
+### First Baseline Comparisons
+
+Before trusting the model, compare it against:
+
+- `strategy_alignment_score` alone
+- selector scores alone
+- a simple heuristic blend like:
+  - alignment + selector suitability
+
+The first question is not whether the model is perfect.
+The first question is whether it adds measurable value over the current heuristic stack.
+
+### First `model_score` Interpretation
+
+The first `model_score` should be a normalized representation of expected return on risk.
+
+Recommended first interpretation:
+
+- higher `model_score` means the historical pattern suggests better expected return on risk
+- lower `model_score` means historically weaker expected trade quality
+
+Recommended first output scale:
+
+- `0-100`
+
+But keep the raw prediction too:
+
+- `predicted_return_on_risk`
+
+That way we retain both:
+
+- an interpretable model output
+- a normalized score usable in later `trade_score`
+
+### How `model_score` Feeds Future `trade_score`
+
+The eventual `trade_score` should combine:
+
+- alignment score
+- selector score
+- model score
+- execution quality
+- hard risk gates
+
+High-level shape:
+
+- `trade_score = f(alignment_score, selector_score, model_score, execution_quality, risk_controls)`
+
+Interpretation:
+
+- `alignment_score` says whether the spread itself looks structurally strong
+- selector scores say whether the strategy fits the current market/symbol context
+- `model_score` says what similar trades have actually tended to return
+- `trade_score` says whether the full setup should be acted on
 
 ### Recommended Sequencing
 
-1. Build separate put and call training datasets
-2. Create baseline models per strategy
-3. Compare against heuristic-only performance
-4. Add model outputs into reporting
-5. Only later consider a unified cross-strategy model
+1. Freeze the first label as `expected_return_on_risk`
+2. Build separate put and call training datasets
+3. Create baseline models per strategy
+4. Compare against heuristic-only performance
+5. Add raw predicted return on risk into reporting
+6. Add normalized `model_score` into reporting
+7. Only later consider a unified cross-strategy model
 
 ### Evaluation Areas
 
@@ -641,6 +964,18 @@ ML should help us move from good heuristics to measurable predictive edge, but o
 - at least one model materially improves trade ranking or outcome prediction
 - model behavior is stable enough for forward use
 - model output can be incorporated into `trade_score`
+
+### Immediate Next Implementation Slice
+
+1. Freeze the first target:
+   - `expected_return_on_risk`
+2. Audit whether `buying_power_used` is complete enough to support a stable label
+3. Define the exact training-row inclusion rules
+4. Define the first model output fields:
+   - `predicted_return_on_risk`
+   - `model_score`
+   - `model_score_version`
+5. Build the first baseline evaluation report
 
 ---
 

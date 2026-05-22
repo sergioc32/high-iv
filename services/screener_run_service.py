@@ -17,6 +17,7 @@ from screener.iv_screener import IVScreener
 from screener.put_spread_analyzer import PutSpreadAnalyzer
 from services.persistence_service import PersistenceService
 from services.run_models import ScreenerRunResult
+from services.strategy_selector import MarketContext, StrategySelector
 from utils.display import (
     display_opportunities,
     display_strategy_opportunities,
@@ -43,6 +44,7 @@ class ScreenerRunService:
         opportunities_dir: str = "opportunities",
         persistence_service: PersistenceService | None = None,
         enabled_option_sides: tuple[str, ...] = ("put", "call"),
+        strategy_selector: StrategySelector | None = None,
     ) -> None:
         enabled_sides = tuple(dict.fromkeys(enabled_option_sides))
         invalid_sides = set(enabled_sides) - {"put", "call"}
@@ -61,6 +63,7 @@ class ScreenerRunService:
         self.persistence_service = persistence_service or PersistenceService(
             opportunities_dir=opportunities_dir
         )
+        self.strategy_selector = strategy_selector or StrategySelector()
 
     def run(
         self,
@@ -69,14 +72,16 @@ class ScreenerRunService:
         snapshot_ts: str,
         market_open: bool,
     ) -> ScreenerRunResult:
+        always_review_symbols = self._configured_always_review_symbols()
         self.print_progress(
             "Fetching watchlist symbols for (SPY,IVR,NAS100,High Options Volume)"
         )
         all_symbols = self._collect_watchlist_symbols(api)
+        all_symbols.extend(always_review_symbols)
         print(
             f"Retrieved {len(all_symbols)} symbols from watchlists before de-duplication"
         )
-        all_symbols = list(set(all_symbols))
+        all_symbols = list(dict.fromkeys(all_symbols))
         print(f"Total symbols to screen: {len(all_symbols)}")
 
         if not all_symbols:
@@ -118,6 +123,21 @@ class ScreenerRunService:
 
         self.screener.display_screening_results(high_iv_df, max_display=20)
         top_candidates = self.screener.get_top_candidates(high_iv_df)
+        top_candidates, always_review_added = self._merge_always_review_candidates(
+            top_candidates=top_candidates,
+            metrics_data=metrics_data,
+            always_review_symbols=always_review_symbols,
+        )
+        if always_review_symbols:
+            print(
+                "Always-review symbols requested: "
+                f"{len(always_review_symbols)} | added beyond IV screen: {len(always_review_added)}"
+            )
+            if always_review_added:
+                print(
+                    "Always-review symbols forced into analysis: "
+                    + ", ".join(always_review_added)
+                )
 
         print(f"\nAnalyzing options chains for top {len(top_candidates)} candidates...")
         print("   (This may take a few minutes)\n")
@@ -205,11 +225,28 @@ class ScreenerRunService:
             )
         self._print_dte_warning(diagnostics)
         print()
+        always_review_analyzed = [
+            symbol for symbol in always_review_symbols if symbol in candidate_data
+        ]
+        always_review_with_opportunities = sorted(
+            {
+                opportunity.get("symbol")
+                for opportunity in put_opportunities + call_opportunities
+                if opportunity.get("symbol") in always_review_symbols
+            }
+        )
+        self._print_always_review_summary(
+            always_review_symbols=always_review_symbols,
+            always_review_added=always_review_added,
+            always_review_analyzed=always_review_analyzed,
+            always_review_with_opportunities=always_review_with_opportunities,
+        )
 
         final_put_opportunities: list[dict[str, object]] = []
         final_call_opportunities: list[dict[str, object]] = []
         put_saved_csv_path: str | None = None
         call_saved_csv_path: str | None = None
+        selector_market_context: MarketContext | None = None
 
         if put_analyzer is not None and put_opportunities:
             self.print_progress("Filtering and ranking put spread opportunities")
@@ -217,6 +254,43 @@ class ScreenerRunService:
                 put_opportunities
             )
             final_put_opportunities = self.scorer(final_put_opportunities)
+        elif put_analyzer is not None:
+            print("\nNo put spread opportunities found matching all criteria")
+
+        if call_analyzer is not None:
+            if call_opportunities:
+                self.print_progress("Filtering and ranking call spread opportunities")
+                final_call_opportunities = call_analyzer.filter_opportunities(
+                    call_opportunities
+                )
+                final_call_opportunities = self.scorer(final_call_opportunities)
+            else:
+                print("\nNo call spread opportunities found matching all criteria")
+
+        if final_put_opportunities or final_call_opportunities:
+            selector_market_context = self._fetch_selector_market_context(
+                api=api,
+                snapshot_ts=snapshot_ts,
+                market_open=market_open,
+            )
+            self.strategy_selector.annotate_opportunities(
+                final_put_opportunities, market_context=selector_market_context
+            )
+            self.strategy_selector.annotate_opportunities(
+                final_call_opportunities, market_context=selector_market_context
+            )
+            self._annotate_always_review_opportunities(
+                final_put_opportunities,
+                always_review_symbols=always_review_symbols,
+                always_review_added=always_review_added,
+            )
+            self._annotate_always_review_opportunities(
+                final_call_opportunities,
+                always_review_symbols=always_review_symbols,
+                always_review_added=always_review_added,
+            )
+
+        if put_analyzer is not None and final_put_opportunities:
             self.display_strategy_opportunities(
                 final_put_opportunities,
                 f"Top {len(final_put_opportunities)} Put Spread Opportunities",
@@ -229,30 +303,20 @@ class ScreenerRunService:
                     filename_prefix="put_spread_opportunities",
                 )
                 print(f"Saved put spread opportunities to {put_saved_csv_path}")
-        elif put_analyzer is not None:
-            print("\nNo put spread opportunities found matching all criteria")
 
-        if call_analyzer is not None:
-            if call_opportunities:
-                self.print_progress("Filtering and ranking call spread opportunities")
-                final_call_opportunities = call_analyzer.filter_opportunities(
-                    call_opportunities
-                )
-                final_call_opportunities = self.scorer(final_call_opportunities)
-                self.display_strategy_opportunities(
+        if call_analyzer is not None and final_call_opportunities:
+            self.display_strategy_opportunities(
+                final_call_opportunities,
+                f"Top {len(final_call_opportunities)} Call Spread Opportunities",
+            )
+
+            if config.AUTO_SAVE_CSV:
+                call_saved_csv_path = self.persistence_service.save_opportunities(
                     final_call_opportunities,
-                    f"Top {len(final_call_opportunities)} Call Spread Opportunities",
+                    market_open=market_open,
+                    filename_prefix="call_spread_opportunities",
                 )
-
-                if config.AUTO_SAVE_CSV:
-                    call_saved_csv_path = self.persistence_service.save_opportunities(
-                        final_call_opportunities,
-                        market_open=market_open,
-                        filename_prefix="call_spread_opportunities",
-                    )
-                    print(f"Saved call spread opportunities to {call_saved_csv_path}")
-            else:
-                print("\nNo call spread opportunities found matching all criteria")
+                print(f"Saved call spread opportunities to {call_saved_csv_path}")
 
         final_opportunities = final_put_opportunities + final_call_opportunities
         saved_csv_path = put_saved_csv_path or call_saved_csv_path
@@ -267,6 +331,9 @@ class ScreenerRunService:
             put_final_opportunities=final_put_opportunities,
             call_final_opportunities=final_call_opportunities,
             diagnostics=diagnostics,
+            always_review_symbols=always_review_symbols,
+            always_review_symbols_analyzed=always_review_analyzed,
+            always_review_symbols_with_opportunities=always_review_with_opportunities,
             saved_csv_path=saved_csv_path,
             put_saved_csv_path=put_saved_csv_path,
             call_saved_csv_path=call_saved_csv_path,
@@ -352,6 +419,37 @@ class ScreenerRunService:
             )
         )
         return all_symbols
+
+    @staticmethod
+    def _configured_always_review_symbols() -> list[str]:
+        configured = getattr(config, "ALWAYS_REVIEW_SYMBOLS", ())
+        if not isinstance(configured, (list, tuple, set)):
+            return []
+        return list(
+            dict.fromkeys(
+                symbol.strip().upper()
+                for symbol in configured
+                if isinstance(symbol, str) and symbol.strip()
+            )
+        )
+
+    @staticmethod
+    def _merge_always_review_candidates(
+        *,
+        top_candidates: list[str],
+        metrics_data: dict[str, dict[str, object]],
+        always_review_symbols: list[str],
+    ) -> tuple[list[str], list[str]]:
+        merged = list(dict.fromkeys(top_candidates))
+        added: list[str] = []
+        for symbol in always_review_symbols:
+            if symbol not in metrics_data:
+                continue
+            if symbol in merged:
+                continue
+            merged.append(symbol)
+            added.append(symbol)
+        return merged, added
 
     def _enrich_metrics_with_quotes(
         self,
@@ -618,6 +716,75 @@ class ScreenerRunService:
         )
 
     @staticmethod
+    def _compute_range_position_52w(
+        stock_price: float | None,
+        year_low_price: float | None,
+        year_high_price: float | None,
+    ) -> float | None:
+        if (
+            stock_price is None
+            or year_low_price is None
+            or year_high_price is None
+            or year_high_price <= year_low_price
+        ):
+            return None
+        raw_position = (stock_price - year_low_price) / (
+            year_high_price - year_low_price
+        )
+        return max(0.0, min(1.0, raw_position))
+
+    def _fetch_selector_market_context(
+        self,
+        *,
+        api,
+        snapshot_ts: str,
+        market_open: bool,
+    ) -> MarketContext:
+        proxy_symbols = list(getattr(config, "SELECTOR_MARKET_PROXIES", ("SPY", "QQQ")))
+        metrics_data = api.batch_request_with_delay(
+            proxy_symbols, batch_size=100, delay=0.0
+        )
+        metrics_data = metrics_data or {}
+        for symbol in proxy_symbols:
+            metrics_data.setdefault(symbol, {"symbol": symbol})
+
+        quotes_data = api.get_quotes_batch(proxy_symbols) or {}
+        self._enrich_metrics_with_quotes(
+            metrics_data,
+            quotes_data,
+            snapshot_ts=snapshot_ts,
+            market_open=market_open,
+        )
+
+        for symbol in proxy_symbols:
+            metrics = metrics_data.get(symbol, {})
+            stock_price = self._to_float(metrics.get("last_price"))
+            year_high_price = self._to_float(metrics.get("year_high_price"))
+            year_low_price = self._to_float(metrics.get("year_low_price"))
+            range_position_52w = self._compute_range_position_52w(
+                stock_price=stock_price,
+                year_low_price=year_low_price,
+                year_high_price=year_high_price,
+            )
+            metrics["range_position_52w"] = range_position_52w
+            metrics["distance_to_52w_high_pct"] = (
+                max(year_high_price - stock_price, 0.0) / year_high_price
+                if stock_price is not None
+                and year_high_price is not None
+                and year_high_price > 0
+                else None
+            )
+            metrics["distance_to_52w_low_pct"] = (
+                max(stock_price - year_low_price, 0.0) / year_low_price
+                if stock_price is not None
+                and year_low_price is not None
+                and year_low_price > 0
+                else None
+            )
+
+        return self.strategy_selector.build_market_context(metrics_data)
+
+    @staticmethod
     def _to_float(value: object) -> float | None:
         try:
             return float(value)
@@ -749,6 +916,51 @@ class ScreenerRunService:
         print(f"  No option quotes/greeks:     {diagnostics['no_option_quotes']}")
         print(f"  Exceptions:                  {diagnostics['exceptions']}")
         print("=" * 80)
+
+    def _print_always_review_summary(
+        self,
+        *,
+        always_review_symbols: list[str],
+        always_review_added: list[str],
+        always_review_analyzed: list[str],
+        always_review_with_opportunities: list[str],
+    ) -> None:
+        if not always_review_symbols:
+            return
+
+        print("Always-review universe")
+        print(
+            f"  Configured:                  {len(always_review_symbols)} "
+            f"({', '.join(always_review_symbols)})"
+        )
+        print(f"  Forced beyond IV screen:     {len(always_review_added)}")
+        print(f"  Successfully analyzed:       {len(always_review_analyzed)}")
+        print(f"  Produced raw opportunities:  {len(always_review_with_opportunities)}")
+        if always_review_with_opportunities:
+            print(
+                "  Opportunity symbols:         "
+                + ", ".join(always_review_with_opportunities)
+            )
+        print("=" * 80)
+
+    @staticmethod
+    def _annotate_always_review_opportunities(
+        opportunities: list[dict[str, object]],
+        *,
+        always_review_symbols: list[str],
+        always_review_added: list[str],
+    ) -> None:
+        always_review_set = set(always_review_symbols)
+        added_set = set(always_review_added)
+        for opportunity in opportunities:
+            symbol = str(opportunity.get("symbol") or "").strip().upper()
+            is_always_review = symbol in always_review_set
+            was_forced = symbol in added_set
+            opportunity["always_review_symbol"] = is_always_review
+            opportunity["always_review_forced_into_analysis"] = was_forced
+            opportunity["always_review_source"] = (
+                "configured_always_review" if is_always_review else "screened_universe"
+            )
 
     def _print_strategy_diagnostics(
         self,

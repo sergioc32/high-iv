@@ -10,8 +10,11 @@ Configuration file for options screener.
 IV_RANK_THRESHOLD = 40  # Minimum IV Rank %
 MIN_STOCK_PRICE = 25.00  # Minimum stock price ($25+ filters subscale names)
 # MIN_LIQUIDITY_VOLUME = 1_000_000  # Minimum daily volume if available
-MIN_UNDERLYING_VOLUME = 1_000_000  # Minimum underlying daily share volume
+MIN_UNDERLYING_VOLUME = 1_000_000  # Legacy underlying-volume fallback threshold
 MIN_TASTY_LIQUIDITY_RATING = 2  # Tasty options liquidity rating, 1=thin, 4=most liquid
+ENABLE_UNDERLYING_VOLUME_FALLBACK_FILTER = (
+    False  # Prefer TT liquidity rating; volume fallback is optional
+)
 ENABLE_OI_FILTER = False  # Toggle to enable/disable open interest filtering
 MIN_MARKET_CAP = 1_000_000_000  # Minimum market cap in USD
 MIN_OPTION_OPEN_INTEREST_PER_LEG = 100  # Legacy single threshold fallback
@@ -90,6 +93,7 @@ LONG_PUT_DELTA = PUT_LONG_DELTA
 
 # Ranking engine v2: asymmetric delta scoring, skew integration, soft mode
 RANKING_MODE = "soft"  # "soft" or "strict"
+ALIGNMENT_SCORE_VERSION = "v1"  # Version tag for the live/offline alignment formula
 
 # Delta preference breakpoints
 RANK_DELTA_TARGET = 0.16  # Optimal short-delta anchor
@@ -160,6 +164,96 @@ RANK_EARNINGS_NEAR_TERM_DAYS = 10
 
 
 # ---------------------------------------------------------------------------
+# Strategy selector settings
+# ---------------------------------------------------------------------------
+
+STRATEGY_SELECTOR_MODE = "identify_only"
+SELECTOR_VERSION = "v1"
+SELECTOR_MARKET_PROXIES = ("SPY", "QQQ")
+SELECTOR_BASE_SCORE = 50
+
+# Market-regime thresholds use a 0-100 range-position scale plus decimal distance percentages.
+SELECTOR_MARKET_EXTENDED_BULLISH_MIN_RANGE = 92
+SELECTOR_MARKET_EXTENDED_BULLISH_MAX_DISTANCE_TO_HIGH_PCT = 0.03
+SELECTOR_MARKET_BULLISH_MIN_RANGE = 72
+SELECTOR_MARKET_BULLISH_MAX_RANGE = 91
+SELECTOR_MARKET_BULLISH_MAX_DISTANCE_TO_HIGH_PCT = 0.12
+SELECTOR_MARKET_NEUTRAL_MIN_RANGE = 45
+SELECTOR_MARKET_NEUTRAL_MAX_RANGE = 71
+SELECTOR_MARKET_WEAK_MIN_RANGE = 25
+SELECTOR_MARKET_WEAK_MAX_RANGE = 44
+SELECTOR_MARKET_RISK_OFF_MAX_RANGE = 24
+SELECTOR_MARKET_RISK_OFF_MAX_DISTANCE_TO_LOW_PCT = 0.05
+SELECTOR_MARKET_REGIME_VALUES = {
+    "risk_off": 0,
+    "weak": 1,
+    "neutral": 2,
+    "bullish": 3,
+    "extended_bullish": 4,
+}
+
+# Symbol-extension thresholds use a 0-100 range-position scale.
+SELECTOR_SYMBOL_NEAR_HIGH_MIN_RANGE = 92
+SELECTOR_SYMBOL_UPPER_RANGE_MIN = 75
+SELECTOR_SYMBOL_UPPER_RANGE_MAX = 91
+SELECTOR_SYMBOL_MID_RANGE_MIN = 45
+SELECTOR_SYMBOL_MID_RANGE_MAX = 74
+SELECTOR_SYMBOL_LOWER_RANGE_MIN = 20
+SELECTOR_SYMBOL_LOWER_RANGE_MAX = 44
+SELECTOR_SYMBOL_NEAR_LOW_MAX_RANGE = 19
+
+PUT_SELECTOR_MARKET_ADJUSTMENTS = {
+    "extended_bullish": 12,
+    "bullish": 15,
+    "neutral": 6,
+    "mixed": 0,
+    "weak": -10,
+    "risk_off": -20,
+    "unknown": 0,
+}
+CALL_SELECTOR_MARKET_ADJUSTMENTS = {
+    "extended_bullish": 10,
+    "bullish": 6,
+    "neutral": 0,
+    "mixed": -4,
+    "weak": -12,
+    "risk_off": -22,
+    "unknown": 0,
+}
+PUT_SELECTOR_EXTENSION_ADJUSTMENTS = {
+    "near_high": 0,
+    "upper_range": 8,
+    "mid_range": 12,
+    "lower_range": -8,
+    "near_low": -22,
+    "unknown": 0,
+}
+CALL_SELECTOR_EXTENSION_ADJUSTMENTS = {
+    "near_high": 18,
+    "upper_range": 8,
+    "mid_range": -2,
+    "lower_range": -14,
+    "near_low": -24,
+    "unknown": 0,
+}
+
+SELECTOR_EARNINGS_IMMINENT_DAYS = 7
+SELECTOR_EARNINGS_LATE_CYCLE_MAX_REMAINING_DTE = 21
+SELECTOR_EARNINGS_IMMINENT_PENALTY = -25
+SELECTOR_EARNINGS_PRE_CYCLE_PENALTY = -18
+SELECTOR_EARNINGS_LATE_CYCLE_PENALTY = -6
+
+SELECTOR_PUT_MARGIN = 6
+SELECTOR_CALL_MARGIN = 12
+SELECTOR_VIABLE_FLOOR = 55
+SELECTOR_WEAK_MAX_SCORE = 44
+SELECTOR_MARGINAL_MAX_SCORE = 54
+SELECTOR_STRONG_MIN_SCORE = 70
+SELECTOR_CONFIDENCE_MEDIUM_SPREAD = 12
+SELECTOR_CONFIDENCE_HIGH_SPREAD = 25
+
+
+# ---------------------------------------------------------------------------
 # Runtime / persistence / display settings
 # ---------------------------------------------------------------------------
 
@@ -221,6 +315,10 @@ WATCHLISTS = {
     "high_options_volume": "High Options Volume",
     "tasty_ivr": "tasty IVR",
 }
+
+# Strategic symbols that should always be analyzed, even if they do not
+# naturally make it through the broader IV-based funnel on a given day.
+ALWAYS_REVIEW_SYMBOLS = ("SPY", "QQQ", "IWM")
 
 
 # Account configuration

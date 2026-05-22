@@ -20,6 +20,12 @@ BASE_CANDIDATE_FIELDS = [
     "run_id",
     "snapshot_ts",
     "strategy_version",
+    "strategy_id",
+    "strategy_family",
+    "option_side",
+    "directional_bias",
+    "short_leg_type",
+    "long_leg_type",
     "symbol",
     "expiration_date",
     "dte",
@@ -39,6 +45,19 @@ BASE_CANDIDATE_FIELDS = [
     "skew_ratio",
     "skew_diff",
     "earnings_within_dte",
+    "alignment_score_version",
+    "strategy_alignment_score",
+    "total_rank_score",
+    "delta_preference_component",
+    "skew_component",
+    "ev_component",
+    "liquidity_component",
+    "extension_component",
+    "directional_adjustment",
+    "earnings_adjustment",
+    "alignment_flags",
+    "delta_zone",
+    "explanation_summary",
     "credit_mid",
     "credit_natural",
     "credit_expected",
@@ -53,6 +72,23 @@ CANDIDATE_ONLY_FIELDS = [
     "range_position_52w",
     "distance_to_52w_high_pct",
     "distance_to_52w_low_pct",
+    "selector_version",
+    "market_regime_spy",
+    "market_regime_qqq",
+    "market_regime_summary",
+    "symbol_extension_bucket",
+    "put_selector_score",
+    "call_selector_score",
+    "put_selector_band",
+    "call_selector_band",
+    "selector_preferred_strategy",
+    "selector_confidence",
+    "selector_reason",
+    "selector_earnings_stage",
+    "selector_earnings_penalty",
+    "always_review_symbol",
+    "always_review_forced_into_analysis",
+    "always_review_source",
     "fill_edge",
     "fill_edge_pct",
     "mid_capture_pct",
@@ -188,7 +224,7 @@ def candidate_backfill_lookup_key(
 def run_id_from_daily_opportunity_file(filename: str) -> str:
     """Extract the originating run id from an opportunities_*.csv filename."""
     match = re.search(
-        r"(?:put_spread_)?opportunities_(\d{8}_\d{6})",
+        r"(?:(?:put|call)_spread_)?opportunities_(\d{8}_\d{6})",
         filename or "",
     )
     return match.group(1) if match else ""
@@ -249,8 +285,10 @@ def build_daily_opportunity_lookup(
 ) -> dict[tuple[str, str], dict[str, str]]:
     """Index opportunities_*.csv rows by file name and row number."""
     lookup: dict[tuple[str, str], dict[str, str]] = {}
-    paths = sorted(opportunities_dir.glob("opportunities_*.csv")) + sorted(
-        opportunities_dir.glob("put_spread_opportunities_*.csv")
+    paths = (
+        sorted(opportunities_dir.glob("opportunities_*.csv"))
+        + sorted(opportunities_dir.glob("put_spread_opportunities_*.csv"))
+        + sorted(opportunities_dir.glob("call_spread_opportunities_*.csv"))
     )
     seen_names: set[str] = set()
     for path in paths:

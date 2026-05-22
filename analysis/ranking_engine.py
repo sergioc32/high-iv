@@ -577,6 +577,71 @@ def summarize_strengths(component_scores: dict[str, float | None]) -> str:
     return f"strengths={strengths};watch={watch_items}"
 
 
+def _delta_zone(row: dict) -> str:
+    """Return the candidate's delta zone label for alignment reporting."""
+    short_delta_val = parse_float(row.get("short_delta", ""))
+    profile = strategy_profile(row.get("strategy_id"))
+    if short_delta_val is None:
+        return "unknown"
+    if short_delta_val < profile.delta_target:
+        return "otm"
+    if short_delta_val > profile.delta_penalty_steep:
+        return "itm_drift"
+    return "on_target"
+
+
+def build_alignment_result(
+    row: dict,
+    calibration: CalibrationSet,
+    *,
+    liquidity_value: float | None,
+    score_decimals: int,
+) -> tuple[dict[str, str | float], dict[str, float | None]]:
+    """Return alignment metadata plus raw component scores for a candidate."""
+    component_scores: dict[str, float | None] = {
+        "delta": delta_preference_score(row),
+        "skew": skew_component_score(row, calibration),
+        "ev": ev_component_score(row, calibration),
+        "liquidity": liquidity_value,
+        "extension": extension_component_score(row),
+    }
+    base_score = weighted_total_score(row, component_scores)
+    adjustment = directional_adjustment_factor(row)
+    earnings_multiplier, earnings_flag = earnings_adjustment(row)
+    strategy_alignment_score = round(
+        min(100.0, base_score * adjustment * earnings_multiplier),
+        score_decimals,
+    )
+    flags = compute_alignment_flags(row, component_scores)
+    flags = merge_alignment_flags(flags, earnings_flag)
+    result: dict[str, str | float] = {
+        "alignment_score_version": config.ALIGNMENT_SCORE_VERSION,
+        "delta_preference_component": round(component_scores["delta"], 4)
+        if component_scores["delta"] is not None
+        else "",
+        "skew_component": round(component_scores["skew"], 4)
+        if component_scores["skew"] is not None
+        else "",
+        "ev_component": round(component_scores["ev"], 4)
+        if component_scores["ev"] is not None
+        else "",
+        "liquidity_component": round(component_scores["liquidity"], 4)
+        if component_scores["liquidity"] is not None
+        else "",
+        "extension_component": round(component_scores["extension"], 4)
+        if component_scores["extension"] is not None
+        else "",
+        "directional_adjustment": round(adjustment, 4),
+        "earnings_adjustment": round(earnings_multiplier, 4),
+        "strategy_alignment_score": strategy_alignment_score,
+        "total_rank_score": strategy_alignment_score,
+        "alignment_flags": flags,
+        "delta_zone": _delta_zone(row),
+        "explanation_summary": summarize_strengths(component_scores),
+    }
+    return result, component_scores
+
+
 def rows_grouped_by_run_symbol_expiration(
     rows: Iterable[dict[str, str]],
 ) -> dict[tuple[str, str, str, str], list[dict[str, str]]]:
@@ -622,22 +687,12 @@ def rank_selected_candidates(
         strategy_id = normalize_strategy_id(row.get("strategy_id"))
         calibration = calibrations.get(strategy_id, CalibrationSet([], [], [], [], []))
         liquidity, group_size = liquidity_score(row, rows_by_group)
-        component_scores: dict[str, float | None] = {
-            "delta": delta_preference_score(row),
-            "skew": skew_component_score(row, calibration),
-            "ev": ev_component_score(row, calibration),
-            "liquidity": liquidity,
-            "extension": extension_component_score(row),
-        }
-        base_score = weighted_total_score(row, component_scores)
-        adjustment = directional_adjustment_factor(row)
-        earnings_multiplier, earnings_flag = earnings_adjustment(row)
-        strategy_alignment_score = round(
-            min(100.0, base_score * adjustment * earnings_multiplier),
-            4,
+        alignment_result, component_scores = build_alignment_result(
+            row,
+            calibration,
+            liquidity_value=liquidity,
+            score_decimals=4,
         )
-        flags = compute_alignment_flags(row, component_scores)
-        flags = merge_alignment_flags(flags, earnings_flag)
         confidence, confidence_band = confidence_score(
             component_scores,
             calibration_count=calibration_counts.get(strategy_id, 0),
@@ -647,7 +702,6 @@ def rank_selected_candidates(
             recompute_ev_score(row) or parse_float(row.get("ev_score", "")) or 0.0,
             6,
         )
-        short_delta_val = parse_float(row.get("short_delta", ""))
         ranked_rows.append(
             {
                 "run_id": (row.get("run_id") or "").strip(),
@@ -667,41 +721,27 @@ def rank_selected_candidates(
                 "skew_ratio": (row.get("skew_ratio") or "").strip(),
                 "skew_diff": (row.get("skew_diff") or "").strip(),
                 "ev_score": ev_val,
-                "delta_preference_component": round(component_scores["delta"], 4)
-                if component_scores["delta"] is not None
-                else "",
-                "skew_component": round(component_scores["skew"], 4)
-                if component_scores["skew"] is not None
-                else "",
-                "ev_component": round(component_scores["ev"], 4)
-                if component_scores["ev"] is not None
-                else "",
-                "liquidity_component": round(component_scores["liquidity"], 4)
-                if component_scores["liquidity"] is not None
-                else "",
-                "extension_component": round(component_scores["extension"], 4)
-                if component_scores["extension"] is not None
-                else "",
-                "directional_adjustment": round(adjustment, 4),
-                "earnings_adjustment": round(earnings_multiplier, 4),
-                "strategy_alignment_score": strategy_alignment_score,
-                "total_rank_score": strategy_alignment_score,  # backward-compat alias
-                "alignment_flags": flags,
+                "alignment_score_version": alignment_result["alignment_score_version"],
+                "delta_preference_component": alignment_result[
+                    "delta_preference_component"
+                ],
+                "skew_component": alignment_result["skew_component"],
+                "ev_component": alignment_result["ev_component"],
+                "liquidity_component": alignment_result["liquidity_component"],
+                "extension_component": alignment_result["extension_component"],
+                "directional_adjustment": alignment_result["directional_adjustment"],
+                "earnings_adjustment": alignment_result["earnings_adjustment"],
+                "strategy_alignment_score": alignment_result[
+                    "strategy_alignment_score"
+                ],
+                "total_rank_score": alignment_result["total_rank_score"],
+                "alignment_flags": alignment_result["alignment_flags"],
                 "confidence_score": round(confidence, 4),
                 "confidence_band": confidence_band,
                 "liquidity_group_size": group_size,
                 "calibration_selected_count": calibration_counts.get(strategy_id, 0),
-                "explanation_summary": summarize_strengths(component_scores),
-                "delta_zone": (
-                    "otm"
-                    if short_delta_val is not None
-                    and short_delta_val < strategy_profile(strategy_id).delta_target
-                    else "itm_drift"
-                    if short_delta_val is not None
-                    and short_delta_val
-                    > strategy_profile(strategy_id).delta_penalty_steep
-                    else "on_target"
-                ),
+                "explanation_summary": alignment_result["explanation_summary"],
+                "delta_zone": alignment_result["delta_zone"],
             }
         )
 
@@ -731,6 +771,7 @@ def write_rankings(path: Path, rows: list[dict[str, str | float | int]]) -> None
         "run_id",
         "snapshot_ts",
         "strategy_id",
+        "alignment_score_version",
         "symbol",
         "expiration_date",
         "dte",
@@ -854,24 +895,13 @@ def score_opportunities(opportunities: list[dict]) -> list[dict]:
                 "distance_to_52w_low_pct": opp.get("distance_to_52w_low_pct"),
             }
 
-            component_scores: dict[str, float | None] = {
-                "delta": delta_preference_score(proxy),
-                "skew": skew_component_score(proxy, calibration),
-                "ev": ev_component_score(proxy, calibration),
-                "liquidity": 0.5,  # neutral; rejection data not available in live mode
-                "extension": extension_component_score(proxy),
-            }
-
-            base_score = weighted_total_score(proxy, component_scores)
-            adjustment = directional_adjustment_factor(proxy)
-            earnings_multiplier, earnings_flag = earnings_adjustment(proxy)
-            opp["strategy_alignment_score"] = round(
-                min(100.0, base_score * adjustment * earnings_multiplier),
-                2,
+            alignment_result, component_scores = build_alignment_result(
+                proxy,
+                calibration,
+                liquidity_value=0.5,  # neutral; rejection data not available in live mode
+                score_decimals=2,
             )
-            base_flags = compute_alignment_flags(proxy, component_scores)
-            opp["alignment_flags"] = merge_alignment_flags(base_flags, earnings_flag)
-            opp["earnings_adjustment"] = round(earnings_multiplier, 4)
+            opp.update(alignment_result)
 
     return sorted(
         opportunities,

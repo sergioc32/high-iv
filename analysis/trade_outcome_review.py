@@ -13,6 +13,22 @@ DEFAULT_EXECUTED_TRADES = PROJECT_ROOT / "analysis" / "executed_trade_dataset.cs
 DEFAULT_REPORTS_DIR = PROJECT_ROOT / "analysis" / "reports"
 REPORT_CSV_COLUMNS = ["section", "dimension", "group", "metric", "value"]
 
+SELECTOR_REVIEW_FIELDS = [
+    ("selector_version", "Selector Version"),
+    ("alignment_score_version", "Alignment Score Version"),
+    ("selector_preferred_strategy", "Preferred Strategy"),
+    ("put_selector_score", "Put Selector Score"),
+    ("call_selector_score", "Call Selector Score"),
+    ("market_regime_summary", "Market Regime"),
+    ("symbol_extension_bucket", "Symbol Extension"),
+    ("always_review_symbol", "Always Review Symbol"),
+    (
+        "always_review_forced_into_analysis",
+        "Always Review Forced Into Analysis",
+    ),
+    ("always_review_source", "Always Review Source"),
+]
+
 
 def load_csv_rows(path: Path) -> tuple[list[str], list[dict[str, str]]]:
     """Load a CSV file and return header plus rows."""
@@ -28,6 +44,14 @@ def write_csv(path: Path, header: list[str], rows: list[list[str]]) -> None:
         writer = csv.writer(handle)
         writer.writerow(header)
         writer.writerows(rows)
+
+
+def format_repo_relative_path(path: Path) -> str:
+    """Render a path relative to the repo root when possible."""
+    try:
+        return str(path.relative_to(PROJECT_ROOT))
+    except ValueError:
+        return str(path)
 
 
 def parse_float(value: object) -> float | None:
@@ -87,6 +111,81 @@ def delta_band(value: object) -> str:
     if number < 0.30:
         return "0.20-0.29"
     return ">=0.30"
+
+
+def normalize_group_label(value: object) -> str:
+    """Normalize grouped labels for reporting output."""
+    raw = str(value or "").strip()
+    return raw if raw else "(blank)"
+
+
+def always_review_flag_label(value: object) -> str:
+    """Normalize always-review boolean flags for grouped reporting."""
+    raw = str(value or "").strip()
+    if raw == "":
+        return "(blank)"
+    return "true" if as_bool(raw) else "false"
+
+
+def selector_alignment_group(row: dict[str, str]) -> str:
+    """Summarize whether selector preference matched the executed strategy."""
+    preferred = (row.get("selector_preferred_strategy") or "").strip().lower()
+    strategy_id = (row.get("strategy_id") or "").strip().lower()
+    if not preferred:
+        return "missing_preference"
+    if preferred == "both":
+        return "both"
+    if preferred == "none":
+        return "none"
+    if not strategy_id:
+        return "missing_strategy"
+    if preferred == "put" and strategy_id == "put_credit_spread":
+        return "preferred_match"
+    if preferred == "call" and strategy_id == "call_credit_spread":
+        return "preferred_match"
+    return "preferred_mismatch"
+
+
+def build_field_coverage_rows(
+    rows: list[dict[str, str]],
+    *,
+    cohort_name: str,
+    fields: list[tuple[str, str]] | None = None,
+) -> list[dict[str, str]]:
+    """Summarize how completely a cohort is populated for selector fields."""
+    selected_fields = fields or SELECTOR_REVIEW_FIELDS
+    total = len(rows)
+    coverage_rows: list[dict[str, str]] = []
+    for field_name, label in selected_fields:
+        populated = sum(
+            1 for row in rows if str(row.get(field_name) or "").strip() != ""
+        )
+        coverage_rows.append(
+            {
+                "cohort": cohort_name,
+                "feature": label,
+                "populated": str(populated),
+                "total": str(total),
+                "share": f"{(populated / total):.1%}" if total else "0.0%",
+            }
+        )
+    return coverage_rows
+
+
+def coverage_share_for_feature(
+    coverage_rows: list[dict[str, str]],
+    *,
+    feature: str,
+) -> float:
+    """Return population share for one feature coverage row, defaulting to 0.0."""
+    for row in coverage_rows:
+        if row.get("feature") == feature:
+            share_text = (row.get("share") or "").strip().rstrip("%")
+            try:
+                return float(share_text) / 100.0
+            except ValueError:
+                return 0.0
+    return 0.0
 
 
 def summarize_performance(rows: list[dict[str, str]]) -> dict[str, float]:
@@ -246,6 +345,68 @@ def build_markdown_report(
         lambda row: (row.get("strategy_version") or "").strip() or "(blank)",
         top_n,
     )
+    alignment_version_summary = build_group_summary(
+        closed_rows,
+        "alignment_score_version",
+        lambda row: normalize_group_label(row.get("alignment_score_version")),
+        top_n,
+    )
+    selector_version_summary = build_group_summary(
+        closed_rows,
+        "selector_version",
+        lambda row: normalize_group_label(row.get("selector_version")),
+        top_n,
+    )
+    selector_preferred_summary = build_group_summary(
+        closed_rows,
+        "selector_preferred_strategy",
+        lambda row: normalize_group_label(row.get("selector_preferred_strategy")),
+        top_n,
+    )
+    selector_alignment_summary = build_group_summary(
+        closed_rows,
+        "selector_alignment",
+        selector_alignment_group,
+        top_n,
+    )
+    selector_confidence_summary = build_group_summary(
+        closed_rows,
+        "selector_confidence",
+        lambda row: normalize_group_label(row.get("selector_confidence")),
+        top_n,
+    )
+    market_regime_summary = build_group_summary(
+        closed_rows,
+        "market_regime_summary",
+        lambda row: normalize_group_label(row.get("market_regime_summary")),
+        top_n,
+    )
+    symbol_extension_summary = build_group_summary(
+        closed_rows,
+        "symbol_extension_bucket",
+        lambda row: normalize_group_label(row.get("symbol_extension_bucket")),
+        top_n,
+    )
+    always_review_symbol_summary = build_group_summary(
+        closed_rows,
+        "always_review_symbol",
+        lambda row: always_review_flag_label(row.get("always_review_symbol")),
+        top_n,
+    )
+    always_review_forced_summary = build_group_summary(
+        closed_rows,
+        "always_review_forced_into_analysis",
+        lambda row: always_review_flag_label(
+            row.get("always_review_forced_into_analysis")
+        ),
+        top_n,
+    )
+    always_review_source_summary = build_group_summary(
+        closed_rows,
+        "always_review_source",
+        lambda row: normalize_group_label(row.get("always_review_source")),
+        top_n,
+    )
     dte_summary = build_group_summary(
         feature_linked_rows,
         "dte_band",
@@ -269,6 +430,10 @@ def build_markdown_report(
         top_n,
     )
     feature_coverage_rows = build_feature_coverage_rows(closed_rows)
+    selector_coverage_rows = build_field_coverage_rows(
+        closed_rows,
+        cohort_name="closed_trades",
+    )
 
     lines = [
         "# Trade Outcome Review",
@@ -384,6 +549,209 @@ def build_markdown_report(
             ],
         )
     )
+    lines.extend(["", "### Alignment Score Version"])
+    lines.extend(
+        markdown_table(
+            ["Version", "Trades", "Win Rate", "Avg PnL", "Median PnL", "Total PnL"],
+            [
+                [
+                    row["alignment_score_version"],
+                    row["trade_count"],
+                    row["win_rate"],
+                    row["avg_pnl"],
+                    row["median_pnl"],
+                    row["total_pnl"],
+                ]
+                for row in alignment_version_summary
+            ],
+        )
+    )
+    lines.extend(["", "### Selector Version"])
+    lines.extend(
+        markdown_table(
+            ["Version", "Trades", "Win Rate", "Avg PnL", "Median PnL", "Total PnL"],
+            [
+                [
+                    row["selector_version"],
+                    row["trade_count"],
+                    row["win_rate"],
+                    row["avg_pnl"],
+                    row["median_pnl"],
+                    row["total_pnl"],
+                ]
+                for row in selector_version_summary
+            ],
+        )
+    )
+    lines.extend(["", "## Strategy Selector Review"])
+    lines.append(
+        "Selector scores are informational-only in v1. These tables show how often "
+        "the selector favored each state and whether that preference matched the "
+        "executed strategy."
+    )
+    lines.extend(
+        markdown_table(
+            ["Feature", "Populated", "Total", "Share"],
+            [
+                [
+                    row["feature"],
+                    row["populated"],
+                    row["total"],
+                    row["share"],
+                ]
+                for row in selector_coverage_rows
+            ],
+        )
+    )
+    selector_share = coverage_share_for_feature(
+        selector_coverage_rows,
+        feature="Selector Version",
+    )
+    if selector_share < 1.0:
+        lines.extend(
+            [
+                "",
+                f"- Selector-version coverage across closed trades: {selector_share:.1%}",
+                "- Lower coverage is expected until more trades opened after selector rollout have closed and entered the outcome dataset.",
+            ]
+        )
+    lines.extend(["", "### Preferred Strategy"])
+    lines.extend(
+        markdown_table(
+            ["State", "Trades", "Win Rate", "Avg PnL", "Median PnL", "Total PnL"],
+            [
+                [
+                    row["selector_preferred_strategy"],
+                    row["trade_count"],
+                    row["win_rate"],
+                    row["avg_pnl"],
+                    row["median_pnl"],
+                    row["total_pnl"],
+                ]
+                for row in selector_preferred_summary
+            ],
+        )
+    )
+    lines.extend(["", "### Selector Alignment"])
+    lines.extend(
+        markdown_table(
+            ["Alignment", "Trades", "Win Rate", "Avg PnL", "Median PnL", "Total PnL"],
+            [
+                [
+                    row["selector_alignment"],
+                    row["trade_count"],
+                    row["win_rate"],
+                    row["avg_pnl"],
+                    row["median_pnl"],
+                    row["total_pnl"],
+                ]
+                for row in selector_alignment_summary
+            ],
+        )
+    )
+    lines.extend(["", "## Selector Context Segmentation"])
+    lines.extend(["", "### Selector Confidence"])
+    lines.extend(
+        markdown_table(
+            ["Confidence", "Trades", "Win Rate", "Avg PnL", "Median PnL", "Total PnL"],
+            [
+                [
+                    row["selector_confidence"],
+                    row["trade_count"],
+                    row["win_rate"],
+                    row["avg_pnl"],
+                    row["median_pnl"],
+                    row["total_pnl"],
+                ]
+                for row in selector_confidence_summary
+            ],
+        )
+    )
+    lines.extend(["", "### Market Regime"])
+    lines.extend(
+        markdown_table(
+            ["Regime", "Trades", "Win Rate", "Avg PnL", "Median PnL", "Total PnL"],
+            [
+                [
+                    row["market_regime_summary"],
+                    row["trade_count"],
+                    row["win_rate"],
+                    row["avg_pnl"],
+                    row["median_pnl"],
+                    row["total_pnl"],
+                ]
+                for row in market_regime_summary
+            ],
+        )
+    )
+    lines.extend(["", "### Symbol Extension"])
+    lines.extend(
+        markdown_table(
+            ["Extension", "Trades", "Win Rate", "Avg PnL", "Median PnL", "Total PnL"],
+            [
+                [
+                    row["symbol_extension_bucket"],
+                    row["trade_count"],
+                    row["win_rate"],
+                    row["avg_pnl"],
+                    row["median_pnl"],
+                    row["total_pnl"],
+                ]
+                for row in symbol_extension_summary
+            ],
+        )
+    )
+    lines.extend(["", "### Always-Review Symbol"])
+    lines.extend(
+        markdown_table(
+            ["Flag", "Trades", "Win Rate", "Avg PnL", "Median PnL", "Total PnL"],
+            [
+                [
+                    row["always_review_symbol"],
+                    row["trade_count"],
+                    row["win_rate"],
+                    row["avg_pnl"],
+                    row["median_pnl"],
+                    row["total_pnl"],
+                ]
+                for row in always_review_symbol_summary
+            ],
+        )
+    )
+    lines.extend(["", "### Always-Review Forced State"])
+    lines.extend(
+        markdown_table(
+            ["State", "Trades", "Win Rate", "Avg PnL", "Median PnL", "Total PnL"],
+            [
+                [
+                    row["always_review_forced_into_analysis"],
+                    row["trade_count"],
+                    row["win_rate"],
+                    row["avg_pnl"],
+                    row["median_pnl"],
+                    row["total_pnl"],
+                ]
+                for row in always_review_forced_summary
+            ],
+        )
+    )
+    lines.extend(["", "### Always-Review Source"])
+    lines.extend(
+        markdown_table(
+            ["Source", "Trades", "Win Rate", "Avg PnL", "Median PnL", "Total PnL"],
+            [
+                [
+                    row["always_review_source"],
+                    row["trade_count"],
+                    row["win_rate"],
+                    row["avg_pnl"],
+                    row["median_pnl"],
+                    row["total_pnl"],
+                ]
+                for row in always_review_source_summary
+            ],
+        )
+    )
     lines.extend(["", "## Feature-Linked DTE Segmentation"])
     lines.extend(
         markdown_table(
@@ -462,8 +830,8 @@ def build_markdown_report(
         [
             "",
             "## Artifacts",
-            f"- Markdown: {markdown_output_path}",
-            f"- CSV: {csv_output_path}",
+            f"- Markdown: {format_repo_relative_path(markdown_output_path)}",
+            f"- CSV: {format_repo_relative_path(csv_output_path)}",
         ]
     )
     return "\n".join(lines)
@@ -497,6 +865,10 @@ def build_metrics_rows(
         for metric_name, value in cohort_summary.items():
             rows.append(["cohort", "performance", cohort_name, metric_name, str(value)])
     feature_coverage_rows = build_feature_coverage_rows(closed_rows)
+    selector_coverage_rows = build_field_coverage_rows(
+        closed_rows,
+        cohort_name="closed_trades",
+    )
 
     group_specs = [
         (
@@ -516,6 +888,45 @@ def build_metrics_rows(
         (
             "strategy_version",
             lambda row: (row.get("strategy_version") or "").strip() or "(blank)",
+        ),
+        (
+            "alignment_score_version",
+            lambda row: normalize_group_label(row.get("alignment_score_version")),
+        ),
+        (
+            "selector_version",
+            lambda row: normalize_group_label(row.get("selector_version")),
+        ),
+        (
+            "selector_preferred_strategy",
+            lambda row: normalize_group_label(row.get("selector_preferred_strategy")),
+        ),
+        ("selector_alignment", selector_alignment_group),
+        (
+            "selector_confidence",
+            lambda row: normalize_group_label(row.get("selector_confidence")),
+        ),
+        (
+            "market_regime_summary",
+            lambda row: normalize_group_label(row.get("market_regime_summary")),
+        ),
+        (
+            "symbol_extension_bucket",
+            lambda row: normalize_group_label(row.get("symbol_extension_bucket")),
+        ),
+        (
+            "always_review_symbol",
+            lambda row: always_review_flag_label(row.get("always_review_symbol")),
+        ),
+        (
+            "always_review_forced_into_analysis",
+            lambda row: always_review_flag_label(
+                row.get("always_review_forced_into_analysis")
+            ),
+        ),
+        (
+            "always_review_source",
+            lambda row: normalize_group_label(row.get("always_review_source")),
         ),
         ("dte_band", lambda row: dte_band(row.get("dte"))),
         ("delta_band", lambda row: delta_band(row.get("short_delta"))),
@@ -557,6 +968,25 @@ def build_metrics_rows(
         rows.append(
             [
                 "coverage",
+                row["feature"],
+                row["cohort"],
+                "share",
+                row["share"],
+            ]
+        )
+    for row in selector_coverage_rows:
+        rows.append(
+            [
+                "selector_coverage",
+                row["feature"],
+                row["cohort"],
+                "populated",
+                row["populated"],
+            ]
+        )
+        rows.append(
+            [
+                "selector_coverage",
                 row["feature"],
                 row["cohort"],
                 "share",

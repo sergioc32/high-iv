@@ -170,6 +170,8 @@ def audit_row_integrity(rows: list[dict[str, str]]) -> list[AuditIssue]:
         label_quality_weight = parse_float(row.get("label_quality_weight"))
         win_flag = (row.get("win_flag") or "").strip()
         profit_loss = parse_float(row.get("profit_loss"))
+        max_loss = parse_float(row.get("max_loss"))
+        realized_return_on_risk = parse_float(row.get("realized_return_on_risk"))
         feature_provenance = (row.get("feature_provenance") or "").strip()
         time_split_group = (row.get("time_split_group") or "").strip().lower()
         split_flags = [
@@ -232,6 +234,43 @@ def audit_row_integrity(rows: list[dict[str, str]]) -> list[AuditIssue]:
                     message=f"Invalid win_flag value: {win_flag}",
                 )
             )
+
+        if max_loss is None or max_loss <= 0:
+            issues.append(
+                AuditIssue(
+                    category="labels",
+                    severity="error",
+                    row_number=index,
+                    trade_id=trade_id,
+                    message="Missing or non-positive max_loss on a training row.",
+                )
+            )
+
+        if realized_return_on_risk is None:
+            issues.append(
+                AuditIssue(
+                    category="labels",
+                    severity="error",
+                    row_number=index,
+                    trade_id=trade_id,
+                    message="Missing realized_return_on_risk on a training row.",
+                )
+            )
+        elif profit_loss is not None and max_loss not in {None, 0.0}:
+            expected_ror = profit_loss / max_loss
+            if abs(realized_return_on_risk - expected_ror) > 1e-3:
+                issues.append(
+                    AuditIssue(
+                        category="labels",
+                        severity="error",
+                        row_number=index,
+                        trade_id=trade_id,
+                        message=(
+                            "realized_return_on_risk does not match "
+                            "profit_loss / max_loss."
+                        ),
+                    )
+                )
 
         if sample_weight is None or sample_weight <= 0:
             issues.append(

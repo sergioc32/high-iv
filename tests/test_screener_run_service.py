@@ -27,21 +27,47 @@ class FakeAPI:
         return []
 
     def batch_request_with_delay(self, symbols, batch_size=100, delay=1.0):
-        return {
-            "AAA": {"earnings_date": "2099-01-10"},
-            "BBB": {"earnings_date": "2099-01-15"},
-        }
+        metrics = {}
+        for symbol in symbols:
+            if symbol == "AAA":
+                metrics[symbol] = {"symbol": symbol, "earnings_date": "2099-01-10"}
+            elif symbol == "BBB":
+                metrics[symbol] = {"symbol": symbol, "earnings_date": "2099-01-15"}
+            else:
+                metrics[symbol] = {"symbol": symbol, "earnings_date": ""}
+        return metrics
 
     def get_quotes_batch(self, symbols):
-        return {
-            symbol: {
-                "last_price": 100.0 if symbol == "AAA" else 110.0,
-                "volume": 100000,
-                "market_cap": 1_000_000_000,
-                "is_trading_halted": False,
-            }
-            for symbol in symbols
-        }
+        quotes = {}
+        for symbol in symbols:
+            if symbol == "SPY":
+                quotes[symbol] = {
+                    "last_price": 610.0,
+                    "volume": 5_000_000,
+                    "market_cap": 0,
+                    "year_high_price": 620.0,
+                    "year_low_price": 410.0,
+                    "is_trading_halted": False,
+                }
+            elif symbol == "QQQ":
+                quotes[symbol] = {
+                    "last_price": 525.0,
+                    "volume": 4_000_000,
+                    "market_cap": 0,
+                    "year_high_price": 540.0,
+                    "year_low_price": 360.0,
+                    "is_trading_halted": False,
+                }
+            else:
+                quotes[symbol] = {
+                    "last_price": 100.0 if symbol == "AAA" else 110.0,
+                    "volume": 100000,
+                    "market_cap": 1_000_000_000,
+                    "year_high_price": 120.0,
+                    "year_low_price": 80.0,
+                    "is_trading_halted": False,
+                }
+        return quotes
 
     def get_option_expirations(self, symbol):
         return [{"expiration_date": "2099-01-17"}]
@@ -97,6 +123,9 @@ class FakeAnalyzer:
         earnings_within_dte="",
     ):
         return {
+            "strategy_id": "put_credit_spread",
+            "option_side": "put",
+            "directional_bias": "bullish",
             "symbol": symbol,
             "stock_price": stock_price,
             "short_strike": 95.0,
@@ -108,11 +137,15 @@ class FakeAnalyzer:
             "dte": 30,
             "expiration_date": target_exp["expiration_date"],
             "earnings_within_dte": earnings_within_dte,
+            "short_delta": 0.16,
             "skew_ratio": 1.1,
             "skew_diff": 0.05,
             "short_iv": 0.4,
             "atm_iv": 0.35,
             "ev_score_chosen": 0.8,
+            "range_position_52w": 0.62,
+            "distance_to_52w_high_pct": 0.08,
+            "distance_to_52w_low_pct": 0.14,
         }
 
     def filter_opportunities(self, opportunities):
@@ -185,7 +218,7 @@ class ScreenerRunServiceTests(unittest.TestCase):
         self.assertEqual(metrics_data["AAA"]["volume"], 100_000)
         self.assertGreater(metrics_data["AAA"]["volume_for_filter"], 2_000_000)
 
-    def test_iv_screener_uses_projected_volume_when_available(self):
+    def test_iv_screener_allows_missing_liquidity_without_volume_fallback(self):
         screener = IVScreener()
         metrics_data = {
             "AAA": {
@@ -211,7 +244,7 @@ class ScreenerRunServiceTests(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             result = screener.filter_by_iv_rank(metrics_data)
 
-        self.assertEqual(result["symbol"].tolist(), ["AAA"])
+        self.assertEqual(result["symbol"].tolist(), ["AAA", "BBB"])
 
     def test_iv_screener_prefers_tasty_liquidity_rating_over_volume(self):
         screener = IVScreener()
@@ -371,15 +404,96 @@ class ScreenerRunServiceTests(unittest.TestCase):
                 )
 
                 self.assertTrue(result.success)
-                self.assertEqual(result.all_symbols_count, 2)
+                self.assertEqual(result.all_symbols_count, 5)
                 self.assertEqual(result.screened_symbols_count, 1)
-                self.assertEqual(result.raw_opportunities_count, 1)
-                self.assertEqual(len(result.final_opportunities), 1)
+                self.assertEqual(result.raw_opportunities_count, 2)
+                self.assertEqual(len(result.final_opportunities), 2)
+                self.assertEqual(result.always_review_symbols, ["SPY", "QQQ", "IWM"])
+                self.assertEqual(result.always_review_symbols_analyzed, ["IWM"])
+                self.assertEqual(
+                    result.always_review_symbols_with_opportunities,
+                    ["IWM"],
+                )
                 self.assertIsNotNone(result.saved_csv_path)
                 self.assertTrue(Path(result.saved_csv_path).exists())
 
                 saved_frame = pd.read_csv(result.saved_csv_path)
-                self.assertEqual(saved_frame.loc[0, "symbol"], "AAA")
+                self.assertCountEqual(
+                    saved_frame["symbol"].tolist(),
+                    ["AAA", "IWM"],
+                )
+        finally:
+            config.AUTO_SAVE_CSV = original_auto_save
+
+    def test_run_with_default_scorer_persists_alignment_breakdown_fields(self):
+        original_auto_save = config.AUTO_SAVE_CSV
+        try:
+            config.AUTO_SAVE_CSV = True
+            with tempfile.TemporaryDirectory() as temp_dir:
+                service = ScreenerRunService(
+                    screener=FakeScreener(),
+                    analyzer_factory=FakeAnalyzer,
+                    display_opportunities_fn=lambda opportunities: None,
+                    display_strategy_opportunities_fn=lambda opportunities, title: None,
+                    print_progress_fn=lambda message: None,
+                    opportunities_dir=temp_dir,
+                    enabled_option_sides=("put",),
+                )
+
+                result = service.run(
+                    api=FakeAPI(),
+                    run_id="run-1",
+                    snapshot_ts="2026-05-22T12:00:00",
+                    market_open=True,
+                )
+
+                self.assertTrue(result.success)
+                self.assertEqual(len(result.put_final_opportunities), 2)
+                saved_frame = pd.read_csv(result.put_saved_csv_path)
+                self.assertEqual(
+                    saved_frame.loc[0, "alignment_score_version"],
+                    config.ALIGNMENT_SCORE_VERSION,
+                )
+                for column in (
+                    "selector_version",
+                    "market_regime_spy",
+                    "market_regime_qqq",
+                    "market_regime_summary",
+                    "symbol_extension_bucket",
+                    "put_selector_score",
+                    "call_selector_score",
+                    "selector_preferred_strategy",
+                    "selector_confidence",
+                    "selector_reason",
+                    "strategy_alignment_score",
+                    "delta_preference_component",
+                    "skew_component",
+                    "ev_component",
+                    "liquidity_component",
+                    "extension_component",
+                    "directional_adjustment",
+                    "earnings_adjustment",
+                    "alignment_flags",
+                    "delta_zone",
+                    "explanation_summary",
+                    "always_review_symbol",
+                    "always_review_forced_into_analysis",
+                    "always_review_source",
+                ):
+                    self.assertIn(column, saved_frame.columns)
+                self.assertEqual(
+                    saved_frame.loc[0, "selector_version"], config.SELECTOR_VERSION
+                )
+                iwm_row = saved_frame.loc[saved_frame["symbol"] == "IWM"].iloc[0]
+                aaa_row = saved_frame.loc[saved_frame["symbol"] == "AAA"].iloc[0]
+                self.assertTrue(bool(iwm_row["always_review_symbol"]))
+                self.assertTrue(bool(iwm_row["always_review_forced_into_analysis"]))
+                self.assertEqual(
+                    iwm_row["always_review_source"], "configured_always_review"
+                )
+                self.assertFalse(bool(aaa_row["always_review_symbol"]))
+                self.assertFalse(bool(aaa_row["always_review_forced_into_analysis"]))
+                self.assertEqual(aaa_row["always_review_source"], "screened_universe")
         finally:
             config.AUTO_SAVE_CSV = original_auto_save
 
@@ -407,10 +521,10 @@ class ScreenerRunServiceTests(unittest.TestCase):
                 )
 
                 self.assertTrue(result.success)
-                self.assertEqual(result.raw_opportunities_count, 2)
-                self.assertEqual(len(result.put_final_opportunities), 1)
+                self.assertEqual(result.raw_opportunities_count, 3)
+                self.assertEqual(len(result.put_final_opportunities), 2)
                 self.assertEqual(len(result.call_final_opportunities), 1)
-                self.assertEqual(len(result.final_opportunities), 2)
+                self.assertEqual(len(result.final_opportunities), 3)
                 self.assertIsNotNone(result.put_saved_csv_path)
                 self.assertIsNotNone(result.call_saved_csv_path)
                 self.assertTrue(Path(result.put_saved_csv_path).exists())
@@ -418,8 +532,46 @@ class ScreenerRunServiceTests(unittest.TestCase):
 
                 put_frame = pd.read_csv(result.put_saved_csv_path)
                 call_frame = pd.read_csv(result.call_saved_csv_path)
-                self.assertEqual(put_frame.loc[0, "symbol"], "AAA")
-                self.assertEqual(call_frame.loc[0, "symbol"], "AAA")
+                self.assertCountEqual(
+                    put_frame["symbol"].tolist(),
+                    ["AAA", "IWM"],
+                )
+                self.assertCountEqual(
+                    call_frame["symbol"].tolist(),
+                    ["AAA"],
+                )
+        finally:
+            config.AUTO_SAVE_CSV = original_auto_save
+
+    def test_always_review_symbols_are_forced_into_analysis_outside_iv_screen(self):
+        original_auto_save = config.AUTO_SAVE_CSV
+        try:
+            config.AUTO_SAVE_CSV = False
+            service = ScreenerRunService(
+                screener=FakeScreener(),
+                analyzer_factory=FakeAnalyzer,
+                scorer=lambda opportunities: opportunities,
+                display_opportunities_fn=lambda opportunities: None,
+                display_strategy_opportunities_fn=lambda opportunities, title: None,
+                print_progress_fn=lambda message: None,
+                enabled_option_sides=("put",),
+            )
+
+            result = service.run(
+                api=FakeAPI(),
+                run_id="run-1",
+                snapshot_ts="2026-05-22T12:00:00",
+                market_open=True,
+            )
+
+            self.assertTrue(result.success)
+            self.assertEqual(result.screened_symbols_count, 1)
+            self.assertEqual(result.always_review_symbols, ["SPY", "QQQ", "IWM"])
+            self.assertEqual(result.always_review_symbols_analyzed, ["IWM"])
+            self.assertCountEqual(
+                [item["symbol"] for item in result.put_final_opportunities],
+                ["AAA", "IWM"],
+            )
         finally:
             config.AUTO_SAVE_CSV = original_auto_save
 

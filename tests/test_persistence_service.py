@@ -45,12 +45,12 @@ class PersistenceServiceTests(unittest.TestCase):
             self.assertEqual(
                 list(saved_frame.columns[:6]),
                 [
+                    "strategy_id",
+                    "option_side",
+                    "directional_bias",
+                    "alignment_score_version",
                     "symbol",
                     "stock_price",
-                    "short_strike",
-                    "long_strike",
-                    "width",
-                    "premium",
                 ],
             )
             self.assertEqual(saved_frame.loc[0, "symbol"], "ABC")

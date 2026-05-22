@@ -34,6 +34,9 @@ class ScreenerRunResult:
     put_final_opportunities: list[dict[str, object]] = field(default_factory=list)
     call_final_opportunities: list[dict[str, object]] = field(default_factory=list)
     diagnostics: dict[str, int] = field(default_factory=dict)
+    always_review_symbols: list[str] = field(default_factory=list)
+    always_review_symbols_analyzed: list[str] = field(default_factory=list)
+    always_review_symbols_with_opportunities: list[str] = field(default_factory=list)
     saved_csv_path: str | None = None
     put_saved_csv_path: str | None = None
     call_saved_csv_path: str | None = None

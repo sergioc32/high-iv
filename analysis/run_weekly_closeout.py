@@ -166,6 +166,14 @@ def main() -> None:
         [sys.executable, "ml/training_data_audit.py"],
         "Running training data audit",
     )
+    run_command(
+        [sys.executable, "ml/model_score_baseline_report.py"],
+        "Running model score baseline report",
+    )
+    run_command(
+        [sys.executable, "ml/fit_put_baseline_model.py"],
+        "Running put baseline model fit",
+    )
 
     run_command(
         pipeline_command(

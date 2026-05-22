@@ -2,6 +2,8 @@
 Display utilities for terminal output.
 """
 
+import re
+
 import pandas as pd
 from tabulate import tabulate
 
@@ -22,7 +24,8 @@ def _round_numeric_column(
 def _display_opportunities_table(opportunities: list[dict], title: str) -> None:
     """Display trade opportunities in a formatted table."""
     if not opportunities:
-        print(f"\nNo {title.lower()} found matching criteria\n")
+        empty_title = re.sub(r"^Top\s+\d+\s+", "", title, flags=re.IGNORECASE).strip()
+        print(f"\nNo {empty_title.lower()} found matching criteria\n")
         return
 
     df = pd.DataFrame(opportunities)
@@ -35,6 +38,8 @@ def _display_opportunities_table(opportunities: list[dict], title: str) -> None:
         "max_loss",
         "risk_reward_ratio",
         "strategy_alignment_score",
+        "put_selector_score",
+        "call_selector_score",
         "credit_expected",
         "mid_capture_pct",
         "fill_quality_score",
@@ -64,6 +69,8 @@ def _display_opportunities_table(opportunities: list[dict], title: str) -> None:
         "risk_reward_ratio": "R/R Ratio",
         "ev_score_chosen": "EV Score",
         "strategy_alignment_score": "Align Score",
+        "put_selector_score": "Put Sel",
+        "call_selector_score": "Call Sel",
         "dte": "DTE",
         "earnings_within_dte": "Earnings",
         "skew_ratio": "IV Skew Ratio",
@@ -81,6 +88,8 @@ def _display_opportunities_table(opportunities: list[dict], title: str) -> None:
     _round_numeric_column(df, "R/R Ratio", 2)
     _round_numeric_column(df, "EV Score", 4)
     _round_numeric_column(df, "Align Score", 1)
+    _round_numeric_column(df, "Put Sel", 0)
+    _round_numeric_column(df, "Call Sel", 0)
     _round_numeric_column(df, "IV Skew Ratio", 3)
     if "Earnings" in df.columns:
         df["Earnings"] = df["Earnings"].fillna("")

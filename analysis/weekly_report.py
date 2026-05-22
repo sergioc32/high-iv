@@ -30,6 +30,19 @@ DEFAULT_REPORTS_DIR = PROJECT_ROOT / "analysis" / "reports"
 
 REPORT_CSV_COLUMNS = ["section", "dimension", "group", "metric", "value"]
 
+SELECTOR_REVIEW_FIELDS = [
+    ("selector_version", "Selector Version"),
+    ("alignment_score_version", "Alignment Score Version"),
+    ("selector_preferred_strategy", "Preferred Strategy"),
+    ("put_selector_score", "Put Selector Score"),
+    ("call_selector_score", "Call Selector Score"),
+    ("market_regime_summary", "Market Regime"),
+    ("symbol_extension_bucket", "Symbol Extension"),
+    ("always_review_symbol", "Always Review Symbol"),
+    ("always_review_forced_into_analysis", "Always Review Forced Into Analysis"),
+    ("always_review_source", "Always Review Source"),
+]
+
 REJECTION_COUNTER_EXCLUSIONS = {
     "timestamp",
     "symbol",
@@ -64,6 +77,14 @@ def write_csv(path: Path, header: list[str], rows: Iterable[list[str]]) -> None:
         writer = csv.writer(fh)
         writer.writerow(header)
         writer.writerows(rows)
+
+
+def format_repo_relative_path(path: Path) -> str:
+    """Render a path relative to the repo root when possible."""
+    try:
+        return str(path.relative_to(PROJECT_ROOT))
+    except ValueError:
+        return str(path)
 
 
 def parse_float(value: str) -> float | None:
@@ -187,6 +208,14 @@ def skew_bucket(value: str) -> str:
     if number < 1.10:
         return "1.00-1.09"
     return ">=1.10"
+
+
+def always_review_flag_label(value: str) -> str:
+    """Normalize always-review boolean flags for reporting output."""
+    raw = (value or "").strip()
+    if raw == "":
+        return "(blank)"
+    return "true" if as_bool(raw) else "false"
 
 
 def build_closed_trade_records(
@@ -1290,6 +1319,74 @@ def format_metric(value: float, kind: str) -> str:
     return f"{value:.4f}"
 
 
+def normalize_group_label(value: str) -> str:
+    """Normalize grouped labels for reporting tables."""
+    raw = (value or "").strip()
+    return raw if raw else "(blank)"
+
+
+def selector_alignment_group(row: dict[str, str]) -> str:
+    """Summarize whether selector preference matched the executed strategy."""
+    preferred = (row.get("selector_preferred_strategy") or "").strip().lower()
+    strategy_id = (row.get("strategy_id") or "").strip().lower()
+    if not preferred:
+        return "missing_preference"
+    if preferred == "both":
+        return "both"
+    if preferred == "none":
+        return "none"
+    if not strategy_id:
+        return "missing_strategy"
+    if preferred == "put" and strategy_id == "put_credit_spread":
+        return "preferred_match"
+    if preferred == "call" and strategy_id == "call_credit_spread":
+        return "preferred_match"
+    return "preferred_mismatch"
+
+
+def build_field_coverage_rows(
+    rows: list[dict[str, str]],
+    *,
+    cohort_name: str,
+    fields: list[tuple[str, str]] | None = None,
+) -> list[dict[str, str]]:
+    """Summarize how completely a row cohort is populated for key fields."""
+    selected_fields = fields or SELECTOR_REVIEW_FIELDS
+    total = len(rows)
+    coverage_rows: list[dict[str, str]] = []
+    for field_name, label in selected_fields:
+        populated = sum(
+            1 for row in rows if str(row.get(field_name) or "").strip() != ""
+        )
+        coverage_rows.append(
+            {
+                "cohort": cohort_name,
+                "feature": label,
+                "populated": str(populated),
+                "total": str(total),
+                "share": f"{(populated / total):.1%}" if total else "0.0%",
+            }
+        )
+    return coverage_rows
+
+
+def coverage_share_for_feature(
+    coverage_rows: list[dict[str, str]],
+    *,
+    cohort: str,
+    feature: str,
+) -> float:
+    """Return population share for one coverage row, defaulting to 0.0."""
+    for row in coverage_rows:
+        if row.get("cohort") == cohort and row.get("feature") == feature:
+            share_text = (row.get("share") or "").strip().rstrip("%")
+            try:
+                return float(share_text) / 100.0
+            except ValueError:
+                return 0.0
+    return 0.0
+
+
 def build_execution_alignment_summary(
     closed_records: list[dict[str, object]],
 ) -> dict[str, object]:
@@ -1372,6 +1469,13 @@ def build_markdown_report(
     generated_at: str,
     total_rows: int,
     selected_rows: int,
+    selected_selector_coverage_rows: list[dict[str, str]],
+    closed_selector_coverage_rows: list[dict[str, str]],
+    selected_selector_state_counts: Counter[str],
+    selected_always_review_symbol_counts: Counter[str],
+    selected_always_review_forced_counts: Counter[str],
+    selected_always_review_source_counts: Counter[str],
+    closed_selector_alignment_rows: list[dict[str, object]],
     closed_records: list[dict[str, object]],
     overall: MetricSummary,
     segment_rows: dict[str, list[dict[str, object]]],
@@ -1625,11 +1729,135 @@ def build_markdown_report(
         ]
         lines.extend(markdown_table(["Metric", "Count"], daily_rows))
 
+    lines.extend(["", "## Strategy Selector Review"])
+    lines.append(
+        "Selector scores are informational-only in v1. These sections show how well "
+        "selector metadata is populated and how selector preferences lined up with "
+        "realized executed trades."
+    )
+    lines.extend(["", "### Selector Coverage"])
+    selector_coverage_rows = [
+        [
+            row["cohort"],
+            row["feature"],
+            row["populated"],
+            row["total"],
+            row["share"],
+        ]
+        for row in (selected_selector_coverage_rows + closed_selector_coverage_rows)
+    ]
+    lines.extend(
+        markdown_table(
+            ["Cohort", "Feature", "Populated", "Total", "Share"],
+            selector_coverage_rows,
+        )
+    )
+    selected_selector_share = coverage_share_for_feature(
+        selected_selector_coverage_rows,
+        cohort="selected_rows",
+        feature="Selector Version",
+    )
+    closed_selector_share = coverage_share_for_feature(
+        closed_selector_coverage_rows,
+        cohort="closed_trades",
+        feature="Selector Version",
+    )
+    if selected_selector_share < 1.0 or closed_selector_share < 1.0:
+        lines.extend(
+            [
+                "",
+                "Selector coverage note:",
+                f"- Selected-row selector coverage in this window: {selected_selector_share:.1%}",
+                f"- Closed-trade selector coverage in this window: {closed_selector_share:.1%}",
+                "- Lower coverage is expected during rollout because older opportunity files and historical closed trades predate selector persistence.",
+                "- Use these sections directionally until selector-era trades make up more of the dataset.",
+            ]
+        )
+
+    lines.extend(["", "### Selected Opportunity Preferred State"])
+    selected_state_rows = [
+        [
+            state,
+            str(count),
+            f"{safe_divide(count, max(1, selected_rows)):.1%}",
+        ]
+        for state, count in selected_selector_state_counts.most_common()
+    ]
+    lines.extend(markdown_table(["State", "Count", "Share"], selected_state_rows))
+
+    lines.extend(["", "### Selected Opportunity Always-Review Context"])
+    selected_always_review_rows = [
+        [
+            "always_review_symbol",
+            state,
+            str(count),
+            f"{safe_divide(count, max(1, selected_rows)):.1%}",
+        ]
+        for state, count in selected_always_review_symbol_counts.most_common()
+    ]
+    selected_always_review_rows.extend(
+        [
+            [
+                "forced_into_analysis",
+                state,
+                str(count),
+                f"{safe_divide(count, max(1, selected_rows)):.1%}",
+            ]
+            for state, count in selected_always_review_forced_counts.most_common()
+        ]
+    )
+    selected_always_review_rows.extend(
+        [
+            [
+                "source",
+                state,
+                str(count),
+                f"{safe_divide(count, max(1, selected_rows)):.1%}",
+            ]
+            for state, count in selected_always_review_source_counts.most_common()
+        ]
+    )
+    lines.extend(
+        markdown_table(
+            ["Dimension", "State", "Count", "Share"],
+            selected_always_review_rows,
+        )
+    )
+
+    lines.extend(["", "### Closed Trade Selector Alignment"])
+    selector_alignment_rows = [
+        [
+            str(item["group"]),
+            str(item["trade_count"]),
+            f"{safe_divide(int(item['trade_count']), max(1, len(closed_records))):.1%}",
+            f"{float(item['win_rate']):.2%}",
+            f"{float(item['avg_pnl']):.2f}",
+            f"{float(item['total_pnl']):.2f}",
+        ]
+        for item in closed_selector_alignment_rows
+    ]
+    lines.extend(
+        markdown_table(
+            ["Alignment", "Trades", "Share", "Win Rate", "Avg PnL", "Total PnL"],
+            selector_alignment_rows,
+        )
+    )
+
     lines.extend(["", "## Performance Segmentation"])
 
     dimension_titles = {
         "symbol": "By Symbol",
+        "strategy_id": "By Strategy",
         "strategy_version": "By Strategy Version",
+        "alignment_score_version": "By Alignment Score Version",
+        "selector_version": "By Selector Version",
+        "selector_preferred_strategy": "By Selector Preferred Strategy",
+        "selector_confidence": "By Selector Confidence",
+        "market_regime_summary": "By Market Regime",
+        "symbol_extension_bucket": "By Symbol Extension",
+        "always_review_symbol": "By Always-Review Symbol",
+        "always_review_forced_into_analysis": "By Always-Review Forced State",
+        "always_review_source": "By Always-Review Source",
         "width": "By Width",
         "dte_band": "By DTE Band",
         "delta_band": "By Delta Band",
@@ -1822,8 +2050,8 @@ def build_markdown_report(
         [
             "",
             "## Artifacts",
-            f"- Markdown summary: {markdown_output_path}",
-            f"- Machine-readable CSV: {csv_output_path}",
+            f"- Markdown summary: {format_repo_relative_path(markdown_output_path)}",
+            f"- Machine-readable CSV: {format_repo_relative_path(csv_output_path)}",
         ]
     )
 
@@ -1833,6 +2061,14 @@ def build_markdown_report(
 def build_metrics_export_rows(
     *,
     overall: MetricSummary,
+    selected_rows_count: int,
+    selected_selector_coverage_rows: list[dict[str, str]],
+    closed_selector_coverage_rows: list[dict[str, str]],
+    selected_selector_state_counts: Counter[str],
+    selected_always_review_symbol_counts: Counter[str],
+    selected_always_review_forced_counts: Counter[str],
+    selected_always_review_source_counts: Counter[str],
+    closed_selector_alignment_rows: list[dict[str, object]],
     rolling_window_metrics: list[dict[str, object]],
     rolling_rejection_trends: list[dict[str, object]],
     rolling_rejection_reason_trends: list[dict[str, object]],
@@ -1897,6 +2133,91 @@ def build_metrics_export_rows(
                     "close_reconciliation",
                     "source",
                     source_label,
+                    metric_name,
+                    str(item[metric_name]),
+                ]
+            )
+
+    for row in selected_selector_coverage_rows + closed_selector_coverage_rows:
+        rows.append(
+            [
+                "selector_review",
+                "coverage",
+                f"{row['cohort']}|{row['feature']}",
+                "populated",
+                row["populated"],
+            ]
+        )
+        rows.append(
+            [
+                "selector_review",
+                "coverage",
+                f"{row['cohort']}|{row['feature']}",
+                "share",
+                row["share"],
+            ]
+        )
+
+    for state, count in selected_selector_state_counts.items():
+        rows.append(
+            [
+                "selector_review",
+                "selected_state",
+                state,
+                "count",
+                str(int(count)),
+            ]
+        )
+        rows.append(
+            [
+                "selector_review",
+                "selected_state",
+                state,
+                "share",
+                str(safe_divide(float(count), float(max(1, selected_rows_count)))),
+            ]
+        )
+
+    for dimension, counter in (
+        ("always_review_symbol", selected_always_review_symbol_counts),
+        ("always_review_forced_into_analysis", selected_always_review_forced_counts),
+        ("always_review_source", selected_always_review_source_counts),
+    ):
+        for state, count in counter.items():
+            rows.append(
+                [
+                    "selector_review",
+                    f"selected_{dimension}",
+                    state,
+                    "count",
+                    str(int(count)),
+                ]
+            )
+            rows.append(
+                [
+                    "selector_review",
+                    f"selected_{dimension}",
+                    state,
+                    "share",
+                    str(safe_divide(float(count), float(max(1, selected_rows_count)))),
+                ]
+            )
+
+    for item in closed_selector_alignment_rows:
+        alignment_label = str(item["group"])
+        for metric_name in (
+            "trade_count",
+            "win_rate",
+            "avg_pnl",
+            "median_pnl",
+            "total_pnl",
+            "max_drawdown_proxy",
+        ):
+            rows.append(
+                [
+                    "selector_review",
+                    "closed_alignment",
+                    alignment_label,
                     metric_name,
                     str(item[metric_name]),
                 ]
@@ -2425,6 +2746,38 @@ def main() -> None:
     closed_records = build_closed_trade_records(closed_trade_rows)
     overall = summarize_performance(closed_records)
     close_reconciliation_summary = build_close_reconciliation_summary(closed_records)
+    closed_trade_selector_rows = [
+        row for record in closed_records if isinstance((row := record.get("row")), dict)
+    ]
+    selected_selector_coverage_rows = build_field_coverage_rows(
+        selected_rows,
+        cohort_name="selected_rows",
+    )
+    closed_selector_coverage_rows = build_field_coverage_rows(
+        closed_trade_selector_rows,
+        cohort_name="closed_trades",
+    )
+    selected_selector_state_counts: Counter[str] = Counter(
+        normalize_group_label(row.get("selector_preferred_strategy", ""))
+        for row in selected_rows
+    )
+    selected_always_review_symbol_counts: Counter[str] = Counter(
+        always_review_flag_label(row.get("always_review_symbol", ""))
+        for row in selected_rows
+    )
+    selected_always_review_forced_counts: Counter[str] = Counter(
+        always_review_flag_label(row.get("always_review_forced_into_analysis", ""))
+        for row in selected_rows
+    )
+    selected_always_review_source_counts: Counter[str] = Counter(
+        normalize_group_label(row.get("always_review_source", ""))
+        for row in selected_rows
+    )
+    closed_selector_alignment_rows = build_segment_summaries(
+        closed_records,
+        selector_alignment_group,
+        args.top_n,
+    )
 
     rolling_window_metrics = build_rolling_window_metrics(closed_records)
     rolling_rejection_trends = build_rolling_rejection_trends(
@@ -2446,9 +2799,63 @@ def main() -> None:
             lambda row: (row.get("symbol") or "").strip() or "(missing)",
             args.top_n,
         ),
+        "strategy_id": build_segment_summaries(
+            closed_records,
+            lambda row: normalize_group_label(row.get("strategy_id", "")),
+            args.top_n,
+        ),
         "strategy_version": build_segment_summaries(
             closed_records,
             lambda row: (row.get("strategy_version") or "").strip() or "(missing)",
+            args.top_n,
+        ),
+        "alignment_score_version": build_segment_summaries(
+            closed_records,
+            lambda row: normalize_group_label(row.get("alignment_score_version", "")),
+            args.top_n,
+        ),
+        "selector_version": build_segment_summaries(
+            closed_records,
+            lambda row: normalize_group_label(row.get("selector_version", "")),
+            args.top_n,
+        ),
+        "selector_preferred_strategy": build_segment_summaries(
+            closed_records,
+            lambda row: normalize_group_label(
+                row.get("selector_preferred_strategy", "")
+            ),
+            args.top_n,
+        ),
+        "selector_confidence": build_segment_summaries(
+            closed_records,
+            lambda row: normalize_group_label(row.get("selector_confidence", "")),
+            args.top_n,
+        ),
+        "market_regime_summary": build_segment_summaries(
+            closed_records,
+            lambda row: normalize_group_label(row.get("market_regime_summary", "")),
+            args.top_n,
+        ),
+        "symbol_extension_bucket": build_segment_summaries(
+            closed_records,
+            lambda row: normalize_group_label(row.get("symbol_extension_bucket", "")),
+            args.top_n,
+        ),
+        "always_review_symbol": build_segment_summaries(
+            closed_records,
+            lambda row: always_review_flag_label(row.get("always_review_symbol", "")),
+            args.top_n,
+        ),
+        "always_review_forced_into_analysis": build_segment_summaries(
+            closed_records,
+            lambda row: always_review_flag_label(
+                row.get("always_review_forced_into_analysis", "")
+            ),
+            args.top_n,
+        ),
+        "always_review_source": build_segment_summaries(
+            closed_records,
+            lambda row: normalize_group_label(row.get("always_review_source", "")),
             args.top_n,
         ),
         "width": build_segment_summaries(
@@ -2529,6 +2936,13 @@ def main() -> None:
         generated_at=now,
         total_rows=len(analysis_rows),
         selected_rows=len(selected_rows),
+        selected_selector_coverage_rows=selected_selector_coverage_rows,
+        closed_selector_coverage_rows=closed_selector_coverage_rows,
+        selected_selector_state_counts=selected_selector_state_counts,
+        selected_always_review_symbol_counts=selected_always_review_symbol_counts,
+        selected_always_review_forced_counts=selected_always_review_forced_counts,
+        selected_always_review_source_counts=selected_always_review_source_counts,
+        closed_selector_alignment_rows=closed_selector_alignment_rows,
         closed_records=closed_records,
         overall=overall,
         rolling_window_metrics=rolling_window_metrics,
@@ -2555,6 +2969,14 @@ def main() -> None:
 
     metric_rows = build_metrics_export_rows(
         overall=overall,
+        selected_rows_count=len(selected_rows),
+        selected_selector_coverage_rows=selected_selector_coverage_rows,
+        closed_selector_coverage_rows=closed_selector_coverage_rows,
+        selected_selector_state_counts=selected_selector_state_counts,
+        selected_always_review_symbol_counts=selected_always_review_symbol_counts,
+        selected_always_review_forced_counts=selected_always_review_forced_counts,
+        selected_always_review_source_counts=selected_always_review_source_counts,
+        closed_selector_alignment_rows=closed_selector_alignment_rows,
         rolling_window_metrics=rolling_window_metrics,
         rolling_rejection_trends=rolling_rejection_trends,
         rolling_rejection_reason_trends=rolling_rejection_reason_trends,

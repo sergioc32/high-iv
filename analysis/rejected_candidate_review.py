@@ -53,6 +53,14 @@ def write_csv(path: Path, header: list[str], rows: list[list[str]]) -> None:
         writer.writerows(rows)
 
 
+def format_repo_relative_path(path: Path) -> str:
+    """Render a path relative to the repo root when possible."""
+    try:
+        return str(path.relative_to(PROJECT_ROOT))
+    except ValueError:
+        return str(path)
+
+
 def parse_float(value: object) -> float | None:
     """Parse float-like text into a float."""
     raw = str(value or "").strip()
@@ -261,7 +269,7 @@ def build_markdown_report(
         "# Rejected Candidate Review",
         "",
         f"- Rejected rows analyzed: {len(rejected_rows)}",
-        f"- Source dataset: {DEFAULT_REJECTED_DATASET}",
+        f"- Source dataset: {format_repo_relative_path(DEFAULT_REJECTED_DATASET)}",
         "",
         "## Executive Summary",
         f"- Top rejection bucket: {bucket_counter.most_common(1)[0][0] if bucket_counter else '(none)'}",
@@ -366,8 +374,8 @@ def build_markdown_report(
         [
             "",
             "## Artifacts",
-            f"- Markdown: {markdown_output_path}",
-            f"- CSV: {csv_output_path}",
+            f"- Markdown: {format_repo_relative_path(markdown_output_path)}",
+            f"- CSV: {format_repo_relative_path(csv_output_path)}",
         ]
     )
     return "\n".join(lines)

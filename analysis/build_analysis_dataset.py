@@ -33,6 +33,7 @@ OUTPUT_PATH = PROJECT_ROOT / "analysis" / "analysis_dataset.csv"
 DAILY_OPPORTUNITIES_GLOBS = (
     str(PROJECT_ROOT / "opportunities" / "opportunities_*.csv"),
     str(PROJECT_ROOT / "opportunities" / "put_spread_opportunities_*.csv"),
+    str(PROJECT_ROOT / "opportunities" / "call_spread_opportunities_*.csv"),
 )
 
 # Max calendar-day gap between candidate run date and trade entry date.
@@ -46,6 +47,12 @@ OUTPUT_COLUMNS = [
     "run_id",
     "snapshot_ts",
     "strategy_version",
+    "strategy_id",
+    "strategy_family",
+    "option_side",
+    "directional_bias",
+    "short_leg_type",
+    "long_leg_type",
     "symbol",
     "expiration_date",
     "dte",
@@ -68,6 +75,37 @@ OUTPUT_COLUMNS = [
     "skew_diff",
     # --- Context ---
     "earnings_within_dte",
+    # --- Candidate scoring context ---
+    "alignment_score_version",
+    "strategy_alignment_score",
+    "total_rank_score",
+    "delta_preference_component",
+    "skew_component",
+    "ev_component",
+    "liquidity_component",
+    "extension_component",
+    "directional_adjustment",
+    "earnings_adjustment",
+    "alignment_flags",
+    "delta_zone",
+    "explanation_summary",
+    "selector_version",
+    "market_regime_spy",
+    "market_regime_qqq",
+    "market_regime_summary",
+    "symbol_extension_bucket",
+    "put_selector_score",
+    "call_selector_score",
+    "put_selector_band",
+    "call_selector_band",
+    "selector_preferred_strategy",
+    "selector_confidence",
+    "selector_reason",
+    "selector_earnings_stage",
+    "selector_earnings_penalty",
+    "always_review_symbol",
+    "always_review_forced_into_analysis",
+    "always_review_source",
     # --- Candidate selection ---
     "candidate_status",
     "selected",
@@ -132,6 +170,12 @@ _CANDIDATE_PASSTHROUGH = [
     "run_id",
     "snapshot_ts",
     "strategy_version",
+    "strategy_id",
+    "strategy_family",
+    "option_side",
+    "directional_bias",
+    "short_leg_type",
+    "long_leg_type",
     "symbol",
     "expiration_date",
     "dte",
@@ -157,6 +201,43 @@ _CANDIDATE_PASSTHROUGH = [
     "rejection_reason_flags",
     "anchor_vs_shift_status",
     "shift_steps_from_anchor",
+]
+
+_DAILY_OPPORTUNITY_PASSTHROUGH = [
+    "strategy_version",
+    "strategy_id",
+    "option_side",
+    "directional_bias",
+    "alignment_score_version",
+    "strategy_alignment_score",
+    "total_rank_score",
+    "delta_preference_component",
+    "skew_component",
+    "ev_component",
+    "liquidity_component",
+    "extension_component",
+    "directional_adjustment",
+    "earnings_adjustment",
+    "alignment_flags",
+    "delta_zone",
+    "explanation_summary",
+    "selector_version",
+    "market_regime_spy",
+    "market_regime_qqq",
+    "market_regime_summary",
+    "symbol_extension_bucket",
+    "put_selector_score",
+    "call_selector_score",
+    "put_selector_band",
+    "call_selector_band",
+    "selector_preferred_strategy",
+    "selector_confidence",
+    "selector_reason",
+    "selector_earnings_stage",
+    "selector_earnings_penalty",
+    "always_review_symbol",
+    "always_review_forced_into_analysis",
+    "always_review_source",
 ]
 
 # Open-trade-specific columns to pull from trades_open.
@@ -315,6 +396,37 @@ def _make_symbol_expiration_key(symbol: str, expiration: str) -> tuple[str, str]
     return (symbol.strip(), expiration.strip())
 
 
+def _daily_opportunity_run_id(filename: str) -> str:
+    """Extract run id from a daily opportunities filename when present."""
+    match = re.search(
+        r"(?:(?:put|call)_spread_)?opportunities_(\d{8}_\d{6})",
+        filename or "",
+    )
+    return match.group(1) if match else ""
+
+
+def _daily_opportunity_run_datetime(filename: str) -> datetime | None:
+    """Parse embedded run timestamp from a daily opportunities filename."""
+    run_id = _daily_opportunity_run_id(filename)
+    if not run_id:
+        return None
+    try:
+        return datetime.strptime(run_id, "%Y%m%d_%H%M%S")
+    except ValueError:
+        return None
+
+
+def _parse_snapshot_datetime(value: str) -> datetime | None:
+    """Parse snapshot timestamp text into datetime when possible."""
+    raw = (value or "").strip()
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+
+
 def _trade_expiration(row: dict) -> str:
     """Return expiration value from trade rows across schema variants."""
     expiration = (row.get("expiration") or row.get("expiration_date") or "").strip()
@@ -377,7 +489,7 @@ def _compute_shift_fields(candidate: dict, trade: dict) -> tuple[str, str, str, 
 
 
 def _load_daily_opportunities_index() -> dict[date, list[dict]]:
-    """Load opportunities_*.csv files and index rows by file date."""
+    """Load daily opportunities files and index rows by file date."""
     index: dict[date, list[dict]] = {}
     seen_paths: set[str] = set()
     matched_paths: list[str] = []
@@ -391,7 +503,7 @@ def _load_daily_opportunities_index() -> dict[date, list[dict]]:
     for path in sorted(matched_paths):
         filename = os.path.basename(path)
         match = re.search(
-            r"(?:put_spread_)?opportunities_(\d{8})_\d+.*\.csv$",
+            r"(?:(?:put|call)_spread_)?opportunities_(\d{8})_\d+.*\.csv$",
             filename,
         )
         if not match:
@@ -448,6 +560,8 @@ def _promote_trade_only_match_from_daily_context(row: dict) -> None:
 
 def _find_daily_opportunity_match(
     *,
+    run_id: str,
+    snapshot_ts: str,
     row_date: date | None,
     symbol: str,
     expiration_date: str,
@@ -465,6 +579,8 @@ def _find_daily_opportunity_match(
         return None, "none"
 
     key = _make_spread_key(symbol, expiration_date, short_strike, long_strike)
+    exact_matches: list[dict] = []
+    snapshot_dt = _parse_snapshot_datetime(snapshot_ts)
     for candidate_row in day_rows:
         day_key = _make_spread_key(
             candidate_row.get("symbol", ""),
@@ -473,10 +589,36 @@ def _find_daily_opportunity_match(
             candidate_row.get("long_strike", ""),
         )
         if day_key == key:
-            return candidate_row, "exact"
+            exact_matches.append(candidate_row)
+
+    if exact_matches:
+        exact_matches.sort(
+            key=lambda row: (
+                (
+                    abs(
+                        (
+                            _daily_opportunity_run_datetime(row.get("_source_file", ""))
+                            - snapshot_dt
+                        ).total_seconds()
+                    )
+                    if (
+                        snapshot_dt is not None
+                        and _daily_opportunity_run_datetime(row.get("_source_file", ""))
+                        is not None
+                    )
+                    else float("inf")
+                ),
+                0
+                if _daily_opportunity_run_id(row.get("_source_file", "")) == run_id
+                else 1,
+                int((row.get("_row_index") or "0").strip() or "0"),
+                row.get("_source_file", ""),
+            )
+        )
+        return exact_matches[0], "exact"
 
     # Shifted fallback: same symbol/expiration/width and nearest strikes.
-    filtered: list[tuple[float, dict]] = []
+    filtered: list[tuple[float, int, float, dict]] = []
     for candidate_row in day_rows:
         if (candidate_row.get("symbol") or "").strip() != symbol.strip():
             continue
@@ -499,18 +641,34 @@ def _find_daily_opportunity_match(
             )
         except ValueError:
             continue
-        filtered.append((score, candidate_row))
+        same_run_penalty = (
+            0
+            if _daily_opportunity_run_id(candidate_row.get("_source_file", ""))
+            == run_id
+            else 1
+        )
+        run_dt = _daily_opportunity_run_datetime(candidate_row.get("_source_file", ""))
+        time_distance = (
+            abs((run_dt - snapshot_dt).total_seconds())
+            if snapshot_dt is not None and run_dt is not None
+            else float("inf")
+        )
+        filtered.append((time_distance, same_run_penalty, score, candidate_row))
 
     if not filtered:
         return None, "none"
 
-    filtered.sort(key=lambda item: item[0])
-    return filtered[0][1], "shifted"
+    filtered.sort(
+        key=lambda item: (item[0], item[1], item[2], item[3].get("_source_file", ""))
+    )
+    return filtered[0][3], "shifted"
 
 
 def _enrich_with_daily_opportunity_match(
     row: dict,
     *,
+    run_id: str,
+    snapshot_ts: str,
     row_date: date | None,
     symbol: str,
     expiration_date: str,
@@ -521,6 +679,8 @@ def _enrich_with_daily_opportunity_match(
 ) -> None:
     """Annotate output row with same-day opportunities file match metadata."""
     match_row, match_type = _find_daily_opportunity_match(
+        run_id=run_id,
+        snapshot_ts=snapshot_ts,
         row_date=row_date,
         symbol=symbol,
         expiration_date=expiration_date,
@@ -542,6 +702,10 @@ def _enrich_with_daily_opportunity_match(
     row["daily_opportunity_row"] = match_row.get("_row_index", "")
     row["daily_short_strike"] = match_row.get("short_strike", "")
     row["daily_long_strike"] = match_row.get("long_strike", "")
+    for field in _DAILY_OPPORTUNITY_PASSTHROUGH:
+        value = match_row.get(field, "")
+        if value != "":
+            row[field] = value
 
     shift_steps_from_anchor = (match_row.get("skew_steps_from_anchor") or "").strip()
     if shift_steps_from_anchor:
@@ -755,6 +919,21 @@ def build_output_row(candidate: dict, trade: dict | None, match_status: str) -> 
     row["match_status"] = match_status
 
     if trade is None:
+        candidate_row_date = _candidate_snapshot_date(candidate)
+        if candidate_row_date is None:
+            candidate_row_date = _candidate_run_date(candidate.get("run_id", ""))
+        _enrich_with_daily_opportunity_match(
+            row,
+            run_id=(candidate.get("run_id") or "").strip(),
+            snapshot_ts=(candidate.get("snapshot_ts") or "").strip(),
+            row_date=candidate_row_date,
+            symbol=row.get("symbol", ""),
+            expiration_date=row.get("expiration_date", ""),
+            short_strike=row.get("short_strike", ""),
+            long_strike=row.get("long_strike", ""),
+            width=row.get("width", ""),
+            daily_index=build_output_row.daily_index,
+        )
         return row
 
     row["trade_status"] = trade.get("_trade_status", "")
@@ -788,6 +967,8 @@ def build_output_row(candidate: dict, trade: dict | None, match_status: str) -> 
 
     _enrich_with_daily_opportunity_match(
         row,
+        run_id=(candidate.get("run_id") or "").strip(),
+        snapshot_ts=(candidate.get("snapshot_ts") or "").strip(),
         row_date=entry_date,
         symbol=row.get("symbol", ""),
         expiration_date=row.get("expiration_date", ""),
@@ -851,6 +1032,8 @@ def build_trade_only_row(trade: dict, reason: str) -> dict:
 
     _enrich_with_daily_opportunity_match(
         row,
+        run_id="",
+        snapshot_ts="",
         row_date=entry_date,
         symbol=row.get("symbol", ""),
         expiration_date=row.get("expiration_date", ""),

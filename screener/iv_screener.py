@@ -15,6 +15,9 @@ class IVScreener:
         self.min_tasty_liquidity_rating = getattr(
             config, "MIN_TASTY_LIQUIDITY_RATING", 2
         )
+        self.enable_underlying_volume_fallback_filter = getattr(
+            config, "ENABLE_UNDERLYING_VOLUME_FALLBACK_FILTER", False
+        )
         self.min_market_cap = config.MIN_MARKET_CAP
 
     def filter_by_iv_rank(self, metrics_data: dict) -> pd.DataFrame:
@@ -95,7 +98,7 @@ class IVScreener:
                     "falling back to volume for them"
                 )
 
-        if volume_col in df.columns:
+        if volume_col in df.columns and self.enable_underlying_volume_fallback_filter:
             volume_fallback_mask = (
                 df["liquidity_rating"].isna()
                 if "liquidity_rating" in df.columns
@@ -123,6 +126,20 @@ class IVScreener:
                 print(
                     f"⚠ {missing_volume} symbols missing underlying volume; volume fallback skipped for them"
                 )
+        elif "liquidity_rating" in df.columns:
+            missing_liquidity_after_filter = int(df["liquidity_rating"].isna().sum())
+            if missing_liquidity_after_filter > 0:
+                print(
+                    f"⚠ {missing_liquidity_after_filter} symbols missing Tasty liquidity rating; allowing them through without volume fallback"
+                )
+        elif (
+            volume_col in df.columns
+            and not self.enable_underlying_volume_fallback_filter
+        ):
+            print(
+                "⚠ No Tasty liquidity rating column found and volume fallback is disabled; "
+                "top-level liquidity filtering is effectively watchlist-driven"
+            )
 
         # Require minimum market cap
         if "market_cap" in df.columns:

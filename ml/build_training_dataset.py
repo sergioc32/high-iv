@@ -5,11 +5,12 @@ from __future__ import annotations
 import csv
 import sys
 from pathlib import Path
+from statistics import mean
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_EXECUTED_DATASET = PROJECT_ROOT / "analysis" / "executed_trade_dataset.csv"
 DEFAULT_OUTPUT_PATH = PROJECT_ROOT / "ml" / "training_dataset.csv"
-FEATURE_SCHEMA_VERSION = "v1_entry_time_core"
+FEATURE_SCHEMA_VERSION = "v2_model_score_entry_core"
 TIME_SPLIT_POLICY = "entry_date_chronological_70_15_15"
 TRAIN_FRACTION = 0.70
 VALIDATION_FRACTION = 0.15
@@ -25,6 +26,7 @@ METADATA_COLUMNS = [
     "feature_schema_version",
     "trade_id",
     "symbol",
+    "strategy_id",
     "run_id",
     "snapshot_ts",
     "entry_date",
@@ -49,6 +51,10 @@ METADATA_COLUMNS = [
 
 FEATURE_COLUMNS = [
     "strategy_version",
+    "alignment_score_version",
+    "selector_version",
+    "option_side",
+    "directional_bias",
     "expiration_date",
     "dte",
     "stock_price",
@@ -84,10 +90,22 @@ FEATURE_COLUMNS = [
     "anchor_vs_shift_status",
     "shift_steps_from_anchor",
     "shift_direction",
+    "strategy_alignment_score",
+    "total_rank_score",
+    "put_selector_score",
+    "call_selector_score",
+    "selector_preferred_strategy",
+    "selector_confidence",
+    "market_regime_summary",
+    "symbol_extension_bucket",
+    "selector_earnings_stage",
+    "selector_earnings_penalty",
 ]
 
 DERIVED_FEATURE_COLUMNS = [
     "moneyness_pct",
+    "distance_to_short_strike_points",
+    "distance_to_short_strike_pct",
     "width_pct_of_stock",
     "premium_pct_of_width",
     "iv_spread",
@@ -102,10 +120,12 @@ DERIVED_FEATURE_COLUMNS = [
 
 LABEL_COLUMNS = [
     "win_flag",
+    "realized_return_on_risk",
     "profit_loss",
     "profit_loss_pct",
     "profit_pct_of_max",
     "annualized_return",
+    "days_held",
 ]
 
 OUTPUT_COLUMNS = (
@@ -141,6 +161,8 @@ PROVENANCE_SAMPLE_WEIGHTS: dict[str, float] = {
     "none": 0.2,
 }
 
+INCLUDED_MATCH_STATUSES = {"exact_match", "adjusted_match"}
+
 
 def load_csv_rows(path: Path) -> tuple[list[str], list[dict[str, str]]]:
     """Load a CSV file and return its header and rows."""
@@ -175,6 +197,27 @@ def parse_date(value: object) -> str:
     """Normalize ISO-like date text for stable chronological sorting."""
     raw = str(value or "").strip()
     return raw[:10] if raw else ""
+
+
+def canonical_strategy_id(row: dict[str, str]) -> str:
+    """Resolve strategy_id with safe backward-compatible inference."""
+    strategy_id = (row.get("strategy_id") or "").strip()
+    if strategy_id:
+        return strategy_id
+
+    option_side = (row.get("option_side") or "").strip().lower()
+    if option_side == "put":
+        return "put_credit_spread"
+    if option_side == "call":
+        return "call_credit_spread"
+
+    directional_bias = (row.get("directional_bias") or "").strip().lower()
+    if directional_bias == "bullish":
+        return "put_credit_spread"
+    if directional_bias == "bearish":
+        return "call_credit_spread"
+
+    return "put_credit_spread"
 
 
 def as_bool(value: object) -> bool:
@@ -300,6 +343,16 @@ def derive_features(row: dict[str, str]) -> dict[str, str]:
         if stock_price not in (None, 0) and short_strike is not None
         else None
     )
+    distance_to_short_strike_points = (
+        stock_price - short_strike
+        if stock_price is not None and short_strike is not None
+        else None
+    )
+    distance_to_short_strike_pct = (
+        distance_to_short_strike_points / stock_price
+        if stock_price not in (None, 0) and distance_to_short_strike_points is not None
+        else None
+    )
     width_pct_of_stock = (
         width / stock_price
         if width not in (None, 0) and stock_price not in (None, 0)
@@ -319,6 +372,10 @@ def derive_features(row: dict[str, str]) -> dict[str, str]:
 
     return {
         "moneyness_pct": format_float(moneyness_pct),
+        "distance_to_short_strike_points": format_float(
+            distance_to_short_strike_points
+        ),
+        "distance_to_short_strike_pct": format_float(distance_to_short_strike_pct),
         "width_pct_of_stock": format_float(width_pct_of_stock),
         "premium_pct_of_width": format_float(premium_pct_of_width),
         "iv_spread": format_float(iv_spread),
@@ -359,6 +416,8 @@ def build_output_row(row: dict[str, str]) -> dict[str, object]:
     for column in METADATA_COLUMNS:
         if column == "feature_schema_version":
             output[column] = FEATURE_SCHEMA_VERSION
+        elif column == "strategy_id":
+            output[column] = canonical_strategy_id(row)
         elif column == "sample_weight":
             output[column] = recommended_sample_weight(row)
         elif column == "time_split_policy":
@@ -371,11 +430,26 @@ def build_output_row(row: dict[str, str]) -> dict[str, object]:
     for column in FEATURE_COLUMNS:
         output[column] = row.get(column, "")
 
+    if not str(output.get("strategy_id") or "").strip():
+        output["strategy_id"] = canonical_strategy_id(row)
+
     output.update(derive_features(row))
 
     profit_loss = parse_float(row.get("profit_loss"))
+    max_loss = parse_float(row.get("max_loss"))
     output["win_flag"] = bool_flag(profit_loss > 0 if profit_loss is not None else None)
-    for column in LABEL_COLUMNS[1:]:
+    output["realized_return_on_risk"] = format_float(
+        (profit_loss / max_loss)
+        if profit_loss is not None and max_loss not in {None, 0.0}
+        else None
+    )
+    for column in (
+        "profit_loss",
+        "profit_loss_pct",
+        "profit_pct_of_max",
+        "annualized_return",
+        "days_held",
+    ):
         output[column] = row.get(column, "")
 
     return output
@@ -394,6 +468,9 @@ def build_training_dataset(
         for row in rows
         if (row.get("trade_status") or "").strip().lower() == "closed"
         and (row.get("profit_loss") or "").strip() != ""
+        and (row.get("max_loss") or "").strip() != ""
+        and (row.get("match_status") or "").strip().lower() in INCLUDED_MATCH_STATUSES
+        and as_bool(row.get("reviewed_setup_found"))
     ]
 
     output_rows = [build_output_row(row) for row in closed_rows]
@@ -420,12 +497,16 @@ def main() -> None:
         if (row.get("match_status") or "").strip().lower()
         in {"exact_match", "adjusted_match"}
     )
-    trade_only = sum(
-        1
-        for row in rows
-        if (row.get("match_status") or "").strip().lower() == "trade_only"
-    )
     actual_exit = sum(1 for row in rows if as_bool(row.get("actual_exit_found")))
+    realized_returns = [
+        parse_float(row.get("realized_return_on_risk"))
+        for row in rows
+        if parse_float(row.get("realized_return_on_risk")) is not None
+    ]
+    strategy_counts: dict[str, int] = {}
+    for row in rows:
+        key = (row.get("strategy_id") or "").strip() or "(blank)"
+        strategy_counts[key] = strategy_counts.get(key, 0) + 1
     split_counts = {
         split: sum(1 for row in rows if (row.get("time_split_group") or "") == split)
         for split in ("train", "validation", "test")
@@ -433,8 +514,15 @@ def main() -> None:
     print(f"Training dataset written to: {output_path}")
     print(f"Training rows: {len(rows)}")
     print(f"Matched rows (exact+adjusted): {exact_like}")
-    print(f"Trade-only rows: {trade_only}")
     print(f"Rows with actual exits: {actual_exit}")
+    if realized_returns:
+        print(
+            "Realized return on risk: "
+            f"mean={mean(realized_returns):.4f}, "
+            f"min={min(realized_returns):.4f}, "
+            f"max={max(realized_returns):.4f}"
+        )
+    print(f"Strategy counts: {strategy_counts}")
     print(
         "Time split counts: "
         f"train={split_counts['train']}, "

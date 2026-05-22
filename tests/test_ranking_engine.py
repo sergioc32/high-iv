@@ -1,5 +1,6 @@
 import unittest
 
+import config
 from analysis.ranking_engine import (
     liquidity_score,
     rank_selected_candidates,
@@ -97,6 +98,10 @@ class RankingEngineTests(unittest.TestCase):
             {row["strategy_id"] for row in ranked},
             {"put_credit_spread", "call_credit_spread"},
         )
+        self.assertEqual(
+            {row["alignment_score_version"] for row in ranked},
+            {config.ALIGNMENT_SCORE_VERSION},
+        )
 
     def test_call_extension_component_rewards_near_52w_high(self) -> None:
         opportunities = [
@@ -134,6 +139,43 @@ class RankingEngineTests(unittest.TestCase):
 
         self.assertEqual(ranked[0]["symbol"], "HIGH")
         self.assertIn("near_52w_high", ranked[0]["alignment_flags"])
+
+    def test_score_opportunities_adds_alignment_version_and_components(self) -> None:
+        opportunities = [
+            {
+                "strategy_id": "put_credit_spread",
+                "symbol": "SOXL",
+                "short_delta": 0.16,
+                "skew_ratio": 1.08,
+                "skew_diff": 0.03,
+                "ev_score_chosen": 0.22,
+                "dte": 30,
+                "snapshot_ts": "2026-05-22T10:00:00",
+                "earnings_within_dte": "",
+                "range_position_52w": 0.62,
+                "distance_to_52w_high_pct": 0.08,
+                "distance_to_52w_low_pct": 0.14,
+            }
+        ]
+
+        ranked = score_opportunities(opportunities)
+
+        self.assertEqual(len(ranked), 1)
+        scored = ranked[0]
+        self.assertEqual(
+            scored["alignment_score_version"], config.ALIGNMENT_SCORE_VERSION
+        )
+        self.assertIn("delta_preference_component", scored)
+        self.assertIn("skew_component", scored)
+        self.assertIn("ev_component", scored)
+        self.assertIn("liquidity_component", scored)
+        self.assertIn("extension_component", scored)
+        self.assertIn("directional_adjustment", scored)
+        self.assertIn("earnings_adjustment", scored)
+        self.assertIn("alignment_flags", scored)
+        self.assertIn("delta_zone", scored)
+        self.assertIn("explanation_summary", scored)
+        self.assertEqual(scored["total_rank_score"], scored["strategy_alignment_score"])
 
 
 if __name__ == "__main__":
