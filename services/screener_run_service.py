@@ -42,6 +42,7 @@ class ScreenerRunService:
         ] = display_strategy_opportunities,
         print_progress_fn: Callable[[str], None] = print_progress,
         opportunities_dir: str = "opportunities",
+        review_queue_dir: str = config.REVIEW_QUEUE_DIR,
         persistence_service: PersistenceService | None = None,
         enabled_option_sides: tuple[str, ...] = ("put", "call"),
         strategy_selector: StrategySelector | None = None,
@@ -61,7 +62,8 @@ class ScreenerRunService:
         self.display_strategy_opportunities = display_strategy_opportunities_fn
         self.print_progress = print_progress_fn
         self.persistence_service = persistence_service or PersistenceService(
-            opportunities_dir=opportunities_dir
+            opportunities_dir=opportunities_dir,
+            review_queue_dir=review_queue_dir,
         )
         self.strategy_selector = strategy_selector or StrategySelector()
 
@@ -71,6 +73,7 @@ class ScreenerRunService:
         run_id: str,
         snapshot_ts: str,
         market_open: bool,
+        capture_review_queue: bool = True,
     ) -> ScreenerRunResult:
         always_review_symbols = self._configured_always_review_symbols()
         self.print_progress(
@@ -268,6 +271,16 @@ class ScreenerRunService:
                 print("\nNo call spread opportunities found matching all criteria")
 
         if final_put_opportunities or final_call_opportunities:
+            self._annotate_runtime_metadata(
+                final_put_opportunities,
+                run_id=run_id,
+                snapshot_ts=snapshot_ts,
+            )
+            self._annotate_runtime_metadata(
+                final_call_opportunities,
+                run_id=run_id,
+                snapshot_ts=snapshot_ts,
+            )
             selector_market_context = self._fetch_selector_market_context(
                 api=api,
                 snapshot_ts=snapshot_ts,
@@ -319,6 +332,37 @@ class ScreenerRunService:
                 print(f"Saved call spread opportunities to {call_saved_csv_path}")
 
         final_opportunities = final_put_opportunities + final_call_opportunities
+        review_queue_csv_path = None
+        if config.AUTO_SAVE_CSV and final_opportunities:
+            review_queue_rows = [
+                {
+                    **opportunity,
+                    "decision": "",
+                    "decision_reason": "",
+                    "decision_note": "",
+                }
+                for opportunity in final_opportunities
+            ]
+            should_save_review_queue = (
+                config.AUTO_SAVE_REVIEW_QUEUE and capture_review_queue
+            )
+            if config.REVIEW_QUEUE_REQUIRE_MARKET_OPEN and not market_open:
+                should_save_review_queue = False
+            if should_save_review_queue:
+                review_queue_csv_path = self.persistence_service.save_review_queue(
+                    review_queue_rows,
+                    market_open=market_open,
+                    filename_prefix="review_queue",
+                )
+                print(f"Saved review queue to {review_queue_csv_path}")
+            elif final_opportunities:
+                if not capture_review_queue:
+                    print("Skipped review queue capture: test run")
+                elif not config.AUTO_SAVE_REVIEW_QUEUE:
+                    print("Skipped review queue capture: disabled in config")
+                elif config.REVIEW_QUEUE_REQUIRE_MARKET_OPEN and not market_open:
+                    print("Skipped review queue capture: market is closed")
+
         saved_csv_path = put_saved_csv_path or call_saved_csv_path
         raw_opportunities_count = len(put_opportunities) + len(call_opportunities)
 
@@ -337,7 +381,19 @@ class ScreenerRunService:
             saved_csv_path=saved_csv_path,
             put_saved_csv_path=put_saved_csv_path,
             call_saved_csv_path=call_saved_csv_path,
+            review_queue_csv_path=review_queue_csv_path,
         )
+
+    @staticmethod
+    def _annotate_runtime_metadata(
+        opportunities: list[dict[str, object]],
+        *,
+        run_id: str,
+        snapshot_ts: str,
+    ) -> None:
+        for opportunity in opportunities:
+            opportunity.setdefault("run_id", run_id)
+            opportunity.setdefault("snapshot_ts", snapshot_ts)
 
     def fetch_watchlist_symbols(
         self,
@@ -462,6 +518,10 @@ class ScreenerRunService:
             if symbol in metrics_data and quote:
                 if quote.get("last_price") is not None:
                     metrics_data[symbol]["last_price"] = quote.get("last_price")
+                if quote.get("stock_change_pct") is not None:
+                    metrics_data[symbol]["stock_change_pct"] = quote.get(
+                        "stock_change_pct"
+                    )
                 if quote.get("volume") is not None:
                     metrics_data[symbol]["volume"] = quote.get("volume")
                     volume_for_filter = self._estimate_full_day_volume(
@@ -604,7 +664,7 @@ class ScreenerRunService:
                     "chain": chain,
                     "put_symbols": put_symbols,
                     "call_symbols": call_symbols,
-                    "quote_context": quote,
+                    "quote_context": {**symbol_metrics, **quote},
                 }
                 all_option_symbols.extend(put_symbols)
                 all_option_symbols.extend(call_symbols)
@@ -894,6 +954,10 @@ class ScreenerRunService:
                     earnings_within_dte=earnings_within_dte,
                 )
                 if opportunity:
+                    opportunity.setdefault(
+                        "stock_change_pct",
+                        symbol_metrics.get("stock_change_pct"),
+                    )
                     opportunities.append(opportunity)
 
             except Exception as error:

@@ -32,6 +32,7 @@ from screener.spread_scoring import (
     to_float,
 )
 from screener.strategy_types import PUT_CREDIT_SPREAD
+from screener.theme_tags import build_market_context_fields
 
 
 class _CandidateEvaluator:
@@ -637,6 +638,7 @@ class PutSpreadAnalyzer:
             }
         )
         short_put = get_put_by_strike(chain, short_strike)
+        long_put = get_put_by_strike(chain, long_strike)
         short_delta = abs_delta(short_put.get("delta")) if short_put else None
         premium_per_width = None
         if premium is not None and width:
@@ -651,6 +653,21 @@ class PutSpreadAnalyzer:
         year_low_price = to_float(underlying_quote.get("year_low_price"))
         range_position_52w = self._compute_range_position_52w(
             stock_price, year_low_price, year_high_price
+        )
+        market_context_fields = build_market_context_fields(
+            underlying_quote=underlying_quote,
+            range_position_52w=range_position_52w,
+            earnings_within_dte=earnings_within_dte,
+            avg_width_pct=avg_width_pct,
+            credit_expected=credit_expected,
+            width=width,
+            min_credit_per_width=self.min_credit_per_width,
+            short_delta=short_delta,
+            target_delta=self.target_delta,
+            short_open_interest=short_put.get("open_interest") if short_put else None,
+            long_open_interest=long_put.get("open_interest") if long_put else None,
+            min_short_open_interest=self.min_option_open_interest_short_leg,
+            min_long_open_interest=self.min_option_open_interest_long_leg,
         )
         distance_to_52w_high_pct = (
             max(year_high_price - stock_price, 0.0) / year_high_price
@@ -690,6 +707,7 @@ class PutSpreadAnalyzer:
             "strategy_version": self.strategy_version,
             **self.strategy_identity.log_fields(),
             "symbol": symbol,
+            **market_context_fields,
             "expiration_date": expiration_info.get("expiration_date")
             if expiration_info
             else None,
@@ -1088,6 +1106,8 @@ class PutSpreadAnalyzer:
         skew_metrics = compute_skew_metrics(
             chain, stock_price, spread_strikes["short_strike"]
         )
+        short_put = get_put_by_strike(chain, metrics["short_strike"])
+        long_put = get_put_by_strike(chain, metrics["long_strike"])
         underlying_quote = self._extract_underlying_quote(chain)
         year_high_price = to_float(underlying_quote.get("year_high_price"))
         year_low_price = to_float(underlying_quote.get("year_low_price"))
@@ -1095,6 +1115,21 @@ class PutSpreadAnalyzer:
             stock_price=stock_price,
             year_low_price=year_low_price,
             year_high_price=year_high_price,
+        )
+        market_context_fields = build_market_context_fields(
+            underlying_quote=underlying_quote,
+            range_position_52w=range_position_52w,
+            earnings_within_dte=earnings_within_dte,
+            avg_width_pct=metrics.get("avg_width_pct"),
+            credit_expected=metrics.get("credit_expected"),
+            width=metrics.get("width"),
+            min_credit_per_width=self.min_credit_per_width,
+            short_delta=metrics.get("short_delta"),
+            target_delta=self.target_delta,
+            short_open_interest=short_put.get("open_interest") if short_put else None,
+            long_open_interest=long_put.get("open_interest") if long_put else None,
+            min_short_open_interest=self.min_option_open_interest_short_leg,
+            min_long_open_interest=self.min_option_open_interest_long_leg,
         )
         distance_to_52w_high_pct = (
             (year_high_price - stock_price) / year_high_price
@@ -1116,8 +1151,11 @@ class PutSpreadAnalyzer:
             )
         )
         opportunity = {
+            "run_id": self.run_id,
+            "snapshot_ts": self.snapshot_ts,
             **self.strategy_identity.log_fields(),
             "symbol": symbol,
+            **market_context_fields,
             "stock_price": stock_price,
             "expiration_date": expiration_info["expiration_date"],
             "dte": expiration_info["days_to_expiration"],

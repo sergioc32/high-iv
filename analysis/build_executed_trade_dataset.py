@@ -8,9 +8,15 @@ from __future__ import annotations
 
 import csv
 import re
+import sys
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from utils.analytics_fields import MARKET_CONTEXT_FIELDS  # noqa: E402
+
 DEFAULT_ANALYSIS_DATASET = PROJECT_ROOT / "analysis" / "analysis_dataset.csv"
 DEFAULT_CANDIDATES_PATH = PROJECT_ROOT / "opportunities" / "opportunity_candidates.csv"
 DEFAULT_OUTPUT_PATH = PROJECT_ROOT / "analysis" / "executed_trade_dataset.csv"
@@ -27,6 +33,7 @@ BASE_CANDIDATE_FIELDS = [
     "short_leg_type",
     "long_leg_type",
     "symbol",
+    *MARKET_CONTEXT_FIELDS,
     "expiration_date",
     "dte",
     "stock_price",
@@ -89,6 +96,11 @@ CANDIDATE_ONLY_FIELDS = [
     "always_review_symbol",
     "always_review_forced_into_analysis",
     "always_review_source",
+    "review_decision",
+    "review_decision_reason",
+    "review_decision_note",
+    "review_queue_file",
+    "review_queue_row",
     "fill_edge",
     "fill_edge_pct",
     "mid_capture_pct",

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import sys
 from collections import Counter, defaultdict
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -23,6 +24,15 @@ from pathlib import Path
 from statistics import median
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from analysis.exposure_summary import (  # noqa: E402
+    build_exposure_concentration,
+    build_exposure_markdown_section,
+    build_exposure_metric_rows,
+)
+
 DEFAULT_ANALYSIS_DATASET = PROJECT_ROOT / "analysis" / "analysis_dataset.csv"
 DEFAULT_SYMBOL_LOG = PROJECT_ROOT / "rejections" / "rejections_tracking.csv"
 DEFAULT_CANDIDATE_LOG = PROJECT_ROOT / "opportunities" / "opportunity_candidates.csv"
@@ -41,6 +51,8 @@ SELECTOR_REVIEW_FIELDS = [
     ("always_review_symbol", "Always Review Symbol"),
     ("always_review_forced_into_analysis", "Always Review Forced Into Analysis"),
     ("always_review_source", "Always Review Source"),
+    ("review_decision", "Review Decision"),
+    ("review_decision_reason", "Review Decision Reason"),
 ]
 
 REJECTION_COUNTER_EXCLUSIONS = {
@@ -1475,8 +1487,11 @@ def build_markdown_report(
     selected_always_review_symbol_counts: Counter[str],
     selected_always_review_forced_counts: Counter[str],
     selected_always_review_source_counts: Counter[str],
+    selected_review_decision_counts: Counter[str],
+    selected_review_reason_counts: Counter[str],
     closed_selector_alignment_rows: list[dict[str, object]],
     closed_records: list[dict[str, object]],
+    exposure_concentration_rows: dict[str, list[dict[str, str]]],
     overall: MetricSummary,
     segment_rows: dict[str, list[dict[str, object]]],
     rolling_window_metrics: list[dict[str, object]],
@@ -1513,8 +1528,19 @@ def build_markdown_report(
         f"- Total pnl (closed trades): {overall.total_pnl:.2f}",
         f"- Max drawdown proxy: {overall.max_drawdown_proxy:.2f}",
         "",
-        "## Close Price Reconciliation",
     ]
+    lines.extend(
+        build_exposure_markdown_section(
+            exposure_concentration_rows,
+            markdown_table,
+        )
+    )
+    lines.extend(
+        [
+            "",
+            "## Close Price Reconciliation",
+        ]
+    )
 
     reconciliation_rows = [
         [
@@ -1824,6 +1850,29 @@ def build_markdown_report(
         )
     )
 
+    lines.extend(["", "### Selected Opportunity Review Decisions"])
+    selected_review_rows = [
+        [
+            decision,
+            str(count),
+            f"{safe_divide(count, max(1, selected_rows)):.1%}",
+        ]
+        for decision, count in selected_review_decision_counts.most_common()
+    ]
+    lines.extend(markdown_table(["Decision", "Count", "Share"], selected_review_rows))
+
+    if selected_review_reason_counts:
+        lines.extend(["", "### Selected Opportunity Review Reasons"])
+        selected_reason_rows = [
+            [
+                reason,
+                str(count),
+                f"{safe_divide(count, max(1, selected_rows)):.1%}",
+            ]
+            for reason, count in selected_review_reason_counts.most_common()
+        ]
+        lines.extend(markdown_table(["Reason", "Count", "Share"], selected_reason_rows))
+
     lines.extend(["", "### Closed Trade Selector Alignment"])
     selector_alignment_rows = [
         [
@@ -1858,6 +1907,8 @@ def build_markdown_report(
         "always_review_symbol": "By Always-Review Symbol",
         "always_review_forced_into_analysis": "By Always-Review Forced State",
         "always_review_source": "By Always-Review Source",
+        "review_decision": "By Review Decision",
+        "review_decision_reason": "By Review Decision Reason",
         "width": "By Width",
         "dte_band": "By DTE Band",
         "delta_band": "By Delta Band",
@@ -2068,7 +2119,10 @@ def build_metrics_export_rows(
     selected_always_review_symbol_counts: Counter[str],
     selected_always_review_forced_counts: Counter[str],
     selected_always_review_source_counts: Counter[str],
+    selected_review_decision_counts: Counter[str],
+    selected_review_reason_counts: Counter[str],
     closed_selector_alignment_rows: list[dict[str, object]],
+    exposure_concentration_rows: dict[str, list[dict[str, str]]],
     rolling_window_metrics: list[dict[str, object]],
     rolling_rejection_trends: list[dict[str, object]],
     rolling_rejection_reason_trends: list[dict[str, object]],
@@ -2203,6 +2257,30 @@ def build_metrics_export_rows(
                 ]
             )
 
+    for dimension, counter in (
+        ("review_decision", selected_review_decision_counts),
+        ("review_decision_reason", selected_review_reason_counts),
+    ):
+        for state, count in counter.items():
+            rows.append(
+                [
+                    "selector_review",
+                    f"selected_{dimension}",
+                    state,
+                    "count",
+                    str(int(count)),
+                ]
+            )
+            rows.append(
+                [
+                    "selector_review",
+                    f"selected_{dimension}",
+                    state,
+                    "share",
+                    str(safe_divide(float(count), float(max(1, selected_rows_count)))),
+                ]
+            )
+
     for item in closed_selector_alignment_rows:
         alignment_label = str(item["group"])
         for metric_name in (
@@ -2222,6 +2300,8 @@ def build_metrics_export_rows(
                     str(item[metric_name]),
                 ]
             )
+
+    rows.extend(build_exposure_metric_rows(exposure_concentration_rows))
 
     execution_alignment_summary = build_execution_alignment_summary(closed_records)
     alignment_counts: Counter[str] = execution_alignment_summary["alignment_counts"]
@@ -2726,6 +2806,11 @@ def main() -> None:
         start_date,
         end_date,
     )
+    open_trade_rows = [
+        row
+        for row in analysis_rows
+        if (row.get("trade_status") or "").strip().lower() == "open"
+    ]
     selected_rows = [row for row in analysis_rows if as_bool(row.get("selected", ""))]
 
     symbol_header, symbol_rows = load_csv_rows(args.symbol_log)
@@ -2749,6 +2834,11 @@ def main() -> None:
     closed_trade_selector_rows = [
         row for record in closed_records if isinstance((row := record.get("row")), dict)
     ]
+    exposure_concentration_rows = build_exposure_concentration(
+        open_rows=open_trade_rows,
+        closed_rows=closed_trade_selector_rows,
+        top_n=args.top_n,
+    )
     selected_selector_coverage_rows = build_field_coverage_rows(
         selected_rows,
         cohort_name="selected_rows",
@@ -2772,6 +2862,14 @@ def main() -> None:
     selected_always_review_source_counts: Counter[str] = Counter(
         normalize_group_label(row.get("always_review_source", ""))
         for row in selected_rows
+    )
+    selected_review_decision_counts: Counter[str] = Counter(
+        normalize_group_label(row.get("review_decision", "")) for row in selected_rows
+    )
+    selected_review_reason_counts: Counter[str] = Counter(
+        normalize_group_label(row.get("review_decision_reason", ""))
+        for row in selected_rows
+        if (row.get("review_decision_reason") or "").strip()
     )
     closed_selector_alignment_rows = build_segment_summaries(
         closed_records,
@@ -2858,6 +2956,16 @@ def main() -> None:
             lambda row: normalize_group_label(row.get("always_review_source", "")),
             args.top_n,
         ),
+        "review_decision": build_segment_summaries(
+            closed_records,
+            lambda row: normalize_group_label(row.get("review_decision", "")),
+            args.top_n,
+        ),
+        "review_decision_reason": build_segment_summaries(
+            closed_records,
+            lambda row: normalize_group_label(row.get("review_decision_reason", "")),
+            args.top_n,
+        ),
         "width": build_segment_summaries(
             closed_records,
             lambda row: normalize_width(row.get("width", "")),
@@ -2942,8 +3050,11 @@ def main() -> None:
         selected_always_review_symbol_counts=selected_always_review_symbol_counts,
         selected_always_review_forced_counts=selected_always_review_forced_counts,
         selected_always_review_source_counts=selected_always_review_source_counts,
+        selected_review_decision_counts=selected_review_decision_counts,
+        selected_review_reason_counts=selected_review_reason_counts,
         closed_selector_alignment_rows=closed_selector_alignment_rows,
         closed_records=closed_records,
+        exposure_concentration_rows=exposure_concentration_rows,
         overall=overall,
         rolling_window_metrics=rolling_window_metrics,
         rolling_rejection_trends=rolling_rejection_trends,
@@ -2976,7 +3087,10 @@ def main() -> None:
         selected_always_review_symbol_counts=selected_always_review_symbol_counts,
         selected_always_review_forced_counts=selected_always_review_forced_counts,
         selected_always_review_source_counts=selected_always_review_source_counts,
+        selected_review_decision_counts=selected_review_decision_counts,
+        selected_review_reason_counts=selected_review_reason_counts,
         closed_selector_alignment_rows=closed_selector_alignment_rows,
+        exposure_concentration_rows=exposure_concentration_rows,
         rolling_window_metrics=rolling_window_metrics,
         rolling_rejection_trends=rolling_rejection_trends,
         rolling_rejection_reason_trends=rolling_rejection_reason_trends,

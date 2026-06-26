@@ -19,6 +19,7 @@ def write_csv(path: Path, fieldnames: list[str], rows: list[dict[str, object]]) 
 class AnalyticsDatasetTests(unittest.TestCase):
     def _build_fixture(self, root: Path) -> tuple[Path, Path, Path]:
         opportunities_dir = root / "opportunities"
+        review_dir = root / "opportunities_review"
         trades_dir = root / "trades"
         analysis_dir = root / "analysis"
 
@@ -35,6 +36,17 @@ class AnalyticsDatasetTests(unittest.TestCase):
                 "short_leg_type": "short_call",
                 "long_leg_type": "long_call",
                 "symbol": "XYZ",
+                "sector": "Technology",
+                "industry": "Semiconductors",
+                "risk_theme_tags": (
+                    "high_iv_rank_70_plus,small_cap,speculative_small_cap_high_iv"
+                ),
+                "technical_theme_tags": "near_52w_high,near_52w_high_extended",
+                "theme_tags": (
+                    "high_iv_rank_70_plus,small_cap,speculative_small_cap_high_iv,"
+                    "near_52w_high,near_52w_high_extended"
+                ),
+                "theme_taxonomy_version": "v1",
                 "expiration_date": "2026-06-19",
                 "dte": "28",
                 "stock_price": "120.0",
@@ -212,6 +224,36 @@ class AnalyticsDatasetTests(unittest.TestCase):
             ],
         )
 
+        write_csv(
+            review_dir / "review_queue_20260522_120100.csv",
+            [
+                "run_id",
+                "snapshot_ts",
+                "strategy_id",
+                "symbol",
+                "expiration_date",
+                "short_strike",
+                "long_strike",
+                "decision",
+                "decision_reason",
+                "decision_note",
+            ],
+            [
+                {
+                    "run_id": "20260522_120000",
+                    "snapshot_ts": "2026-05-22T12:00:00",
+                    "strategy_id": "call_credit_spread",
+                    "symbol": "XYZ",
+                    "expiration_date": "2026-06-19",
+                    "short_strike": "130.0",
+                    "long_strike": "135.0",
+                    "decision": "accepted",
+                    "decision_reason": "",
+                    "decision_note": "Comfortable with the setup.",
+                }
+            ],
+        )
+
         return opportunities_dir, trades_dir, analysis_dir
 
     def test_build_analysis_dataset_propagates_call_selector_metadata(self):
@@ -224,6 +266,7 @@ class AnalyticsDatasetTests(unittest.TestCase):
             original_closed_path = analysis_builder.TRADES_CLOSED_PATH
             original_output_path = analysis_builder.OUTPUT_PATH
             original_daily_globs = analysis_builder.DAILY_OPPORTUNITIES_GLOBS
+            original_review_queue_glob = analysis_builder.REVIEW_QUEUE_GLOB
             try:
                 analysis_builder.CANDIDATES_PATH = (
                     opportunities_dir / "opportunity_candidates.csv"
@@ -233,6 +276,9 @@ class AnalyticsDatasetTests(unittest.TestCase):
                 analysis_builder.OUTPUT_PATH = analysis_dir / "analysis_dataset.csv"
                 analysis_builder.DAILY_OPPORTUNITIES_GLOBS = (
                     str(opportunities_dir / "call_spread_opportunities_*.csv"),
+                )
+                analysis_builder.REVIEW_QUEUE_GLOB = str(
+                    root / "opportunities_review" / "review_queue_*.csv"
                 )
 
                 analysis_builder.build_analysis_dataset()
@@ -249,11 +295,28 @@ class AnalyticsDatasetTests(unittest.TestCase):
                 analysis_builder.TRADES_CLOSED_PATH = original_closed_path
                 analysis_builder.OUTPUT_PATH = original_output_path
                 analysis_builder.DAILY_OPPORTUNITIES_GLOBS = original_daily_globs
+                analysis_builder.REVIEW_QUEUE_GLOB = original_review_queue_glob
 
             self.assertEqual(len(rows), 1)
             row = rows[0]
             self.assertEqual(row["strategy_id"], "call_credit_spread")
             self.assertEqual(row["option_side"], "call")
+            self.assertEqual(row["sector"], "Technology")
+            self.assertEqual(row["industry"], "Semiconductors")
+            self.assertEqual(
+                row["risk_theme_tags"],
+                "high_iv_rank_70_plus,small_cap,speculative_small_cap_high_iv",
+            )
+            self.assertEqual(
+                row["technical_theme_tags"],
+                "near_52w_high,near_52w_high_extended",
+            )
+            self.assertEqual(
+                row["theme_tags"],
+                "high_iv_rank_70_plus,small_cap,speculative_small_cap_high_iv,"
+                "near_52w_high,near_52w_high_extended",
+            )
+            self.assertEqual(row["theme_taxonomy_version"], "v1")
             self.assertEqual(row["alignment_score_version"], "v1")
             self.assertEqual(row["strategy_alignment_score"], "78.40")
             self.assertEqual(row["selector_version"], "v1")
@@ -263,6 +326,12 @@ class AnalyticsDatasetTests(unittest.TestCase):
             self.assertEqual(row["always_review_symbol"], "True")
             self.assertEqual(row["always_review_forced_into_analysis"], "True")
             self.assertEqual(row["always_review_source"], "configured_always_review")
+            self.assertEqual(row["review_decision"], "accepted")
+            self.assertEqual(row["review_decision_reason"], "")
+            self.assertEqual(row["review_decision_note"], "Comfortable with the setup.")
+            self.assertEqual(
+                row["review_queue_file"], "review_queue_20260522_120100.csv"
+            )
             self.assertEqual(
                 row["daily_opportunity_file"],
                 "call_spread_opportunities_20260522_120000.csv",
@@ -636,6 +705,7 @@ class AnalyticsDatasetTests(unittest.TestCase):
             original_closed_path = analysis_builder.TRADES_CLOSED_PATH
             original_output_path = analysis_builder.OUTPUT_PATH
             original_daily_globs = analysis_builder.DAILY_OPPORTUNITIES_GLOBS
+            original_review_queue_glob = analysis_builder.REVIEW_QUEUE_GLOB
             try:
                 analysis_builder.CANDIDATES_PATH = (
                     opportunities_dir / "opportunity_candidates.csv"
@@ -646,6 +716,9 @@ class AnalyticsDatasetTests(unittest.TestCase):
                 analysis_builder.DAILY_OPPORTUNITIES_GLOBS = (
                     str(opportunities_dir / "call_spread_opportunities_*.csv"),
                 )
+                analysis_builder.REVIEW_QUEUE_GLOB = str(
+                    root / "opportunities_review" / "review_queue_*.csv"
+                )
 
                 analysis_builder.build_analysis_dataset()
             finally:
@@ -654,6 +727,7 @@ class AnalyticsDatasetTests(unittest.TestCase):
                 analysis_builder.TRADES_CLOSED_PATH = original_closed_path
                 analysis_builder.OUTPUT_PATH = original_output_path
                 analysis_builder.DAILY_OPPORTUNITIES_GLOBS = original_daily_globs
+                analysis_builder.REVIEW_QUEUE_GLOB = original_review_queue_glob
 
             executed_builder.build_executed_trade_dataset(
                 analysis_dataset_path=analysis_dataset_path,
@@ -672,6 +746,22 @@ class AnalyticsDatasetTests(unittest.TestCase):
             self.assertEqual(len(rows), 1)
             row = rows[0]
             self.assertEqual(row["strategy_id"], "call_credit_spread")
+            self.assertEqual(row["sector"], "Technology")
+            self.assertEqual(row["industry"], "Semiconductors")
+            self.assertEqual(
+                row["risk_theme_tags"],
+                "high_iv_rank_70_plus,small_cap,speculative_small_cap_high_iv",
+            )
+            self.assertEqual(
+                row["technical_theme_tags"],
+                "near_52w_high,near_52w_high_extended",
+            )
+            self.assertEqual(
+                row["theme_tags"],
+                "high_iv_rank_70_plus,small_cap,speculative_small_cap_high_iv,"
+                "near_52w_high,near_52w_high_extended",
+            )
+            self.assertEqual(row["theme_taxonomy_version"], "v1")
             self.assertEqual(row["alignment_score_version"], "v1")
             self.assertEqual(row["selector_version"], "v1")
             self.assertEqual(row["selector_preferred_strategy"], "call")
@@ -679,6 +769,11 @@ class AnalyticsDatasetTests(unittest.TestCase):
             self.assertEqual(row["always_review_symbol"], "True")
             self.assertEqual(row["always_review_forced_into_analysis"], "True")
             self.assertEqual(row["always_review_source"], "configured_always_review")
+            self.assertEqual(row["review_decision"], "accepted")
+            self.assertEqual(row["review_decision_note"], "Comfortable with the setup.")
+            self.assertEqual(
+                row["review_queue_file"], "review_queue_20260522_120100.csv"
+            )
             self.assertEqual(row["feature_provenance"], "candidate_log_exact")
 
 

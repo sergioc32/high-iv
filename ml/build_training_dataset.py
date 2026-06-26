@@ -19,6 +19,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import config  # noqa: E402
+from utils.analytics_fields import MARKET_CONTEXT_FIELDS  # noqa: E402
 
 TARGET_DELTA = float(getattr(config, "TARGET_DELTA", 0.16))
 
@@ -55,6 +56,7 @@ FEATURE_COLUMNS = [
     "selector_version",
     "option_side",
     "directional_bias",
+    *MARKET_CONTEXT_FIELDS,
     "expiration_date",
     "dte",
     "stock_price",

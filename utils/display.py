@@ -21,6 +21,19 @@ def _round_numeric_column(
     df[column_name] = series.round(decimals).fillna("")
 
 
+def _format_signed_percent_points_column(
+    df: pd.DataFrame, column_name: str, decimals: int = 1
+) -> None:
+    """Format optional percent-point columns like +3.3% or -1.1%."""
+    if column_name not in df.columns:
+        return
+
+    series = pd.to_numeric(df[column_name], errors="coerce")
+    df[column_name] = series.map(
+        lambda value: "" if pd.isna(value) else f"{value:+.{decimals}f}%"
+    )
+
+
 def _display_opportunities_table(opportunities: list[dict], title: str) -> None:
     """Display trade opportunities in a formatted table."""
     if not opportunities:
@@ -32,6 +45,7 @@ def _display_opportunities_table(opportunities: list[dict], title: str) -> None:
     display_cols = [
         "symbol",
         "stock_price",
+        "stock_change_pct",
         "short_strike",
         "long_strike",
         "premium",
@@ -57,6 +71,7 @@ def _display_opportunities_table(opportunities: list[dict], title: str) -> None:
     col_labels = {
         "symbol": "Symbol",
         "stock_price": "Stock $",
+        "stock_change_pct": "Chg %",
         "short_strike": "Short Strike",
         "long_strike": "Long Strike",
         "premium": "Premium",
@@ -78,6 +93,7 @@ def _display_opportunities_table(opportunities: list[dict], title: str) -> None:
     df.columns = [col_labels[column] for column in display_cols]
 
     _round_numeric_column(df, "Stock $", 2)
+    _format_signed_percent_points_column(df, "Chg %", 1)
     _round_numeric_column(df, "Premium", 2)
     _round_numeric_column(df, "Exp Credit", 2)
     _round_numeric_column(df, "Fill %", 1, percent=True)

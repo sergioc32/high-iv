@@ -43,6 +43,7 @@ class FakeAPI:
             if symbol == "SPY":
                 quotes[symbol] = {
                     "last_price": 610.0,
+                    "stock_change_pct": 0.8,
                     "volume": 5_000_000,
                     "market_cap": 0,
                     "year_high_price": 620.0,
@@ -52,6 +53,7 @@ class FakeAPI:
             elif symbol == "QQQ":
                 quotes[symbol] = {
                     "last_price": 525.0,
+                    "stock_change_pct": -0.6,
                     "volume": 4_000_000,
                     "market_cap": 0,
                     "year_high_price": 540.0,
@@ -61,6 +63,7 @@ class FakeAPI:
             else:
                 quotes[symbol] = {
                     "last_price": 100.0 if symbol == "AAA" else 110.0,
+                    "stock_change_pct": 3.3 if symbol == "AAA" else -1.1,
                     "volume": 100000,
                     "market_cap": 1_000_000_000,
                     "year_high_price": 120.0,
@@ -344,6 +347,7 @@ class ScreenerRunServiceTests(unittest.TestCase):
                     display_strategy_opportunities_fn=lambda opportunities, title: None,
                     print_progress_fn=lambda message: None,
                     opportunities_dir=temp_dir,
+                    review_queue_dir=temp_dir,
                     enabled_option_sides=("call",),
                 )
 
@@ -394,6 +398,7 @@ class ScreenerRunServiceTests(unittest.TestCase):
                     display_opportunities_fn=lambda opportunities: None,
                     print_progress_fn=lambda message: None,
                     opportunities_dir=temp_dir,
+                    review_queue_dir=temp_dir,
                 )
 
                 result = service.run(
@@ -415,13 +420,29 @@ class ScreenerRunServiceTests(unittest.TestCase):
                     ["IWM"],
                 )
                 self.assertIsNotNone(result.saved_csv_path)
+                self.assertIsNotNone(result.review_queue_csv_path)
                 self.assertTrue(Path(result.saved_csv_path).exists())
+                self.assertTrue(Path(result.review_queue_csv_path).exists())
 
                 saved_frame = pd.read_csv(result.saved_csv_path)
                 self.assertCountEqual(
                     saved_frame["symbol"].tolist(),
                     ["AAA", "IWM"],
                 )
+                review_frame = pd.read_csv(result.review_queue_csv_path)
+                self.assertCountEqual(review_frame["symbol"].tolist(), ["AAA", "IWM"])
+                self.assertTrue((review_frame["run_id"] == "run-1").all())
+                self.assertTrue(review_frame["snapshot_ts"].notna().all())
+                self.assertTrue(
+                    review_frame["snapshot_ts"].astype(str).str.strip().ne("").all()
+                )
+                self.assertIn("stock_change_pct", review_frame.columns)
+                self.assertCountEqual(
+                    review_frame["stock_change_pct"].tolist(), [3.3, -1.1]
+                )
+                self.assertIn("decision", review_frame.columns)
+                self.assertIn("decision_reason", review_frame.columns)
+                self.assertIn("decision_note", review_frame.columns)
         finally:
             config.AUTO_SAVE_CSV = original_auto_save
 
@@ -437,6 +458,7 @@ class ScreenerRunServiceTests(unittest.TestCase):
                     display_strategy_opportunities_fn=lambda opportunities, title: None,
                     print_progress_fn=lambda message: None,
                     opportunities_dir=temp_dir,
+                    review_queue_dir=temp_dir,
                     enabled_option_sides=("put",),
                 )
 
@@ -511,6 +533,7 @@ class ScreenerRunServiceTests(unittest.TestCase):
                     display_strategy_opportunities_fn=lambda opportunities, title: None,
                     print_progress_fn=lambda message: None,
                     opportunities_dir=temp_dir,
+                    review_queue_dir=temp_dir,
                 )
 
                 result = service.run(
@@ -527,11 +550,35 @@ class ScreenerRunServiceTests(unittest.TestCase):
                 self.assertEqual(len(result.final_opportunities), 3)
                 self.assertIsNotNone(result.put_saved_csv_path)
                 self.assertIsNotNone(result.call_saved_csv_path)
+                self.assertIsNotNone(result.review_queue_csv_path)
                 self.assertTrue(Path(result.put_saved_csv_path).exists())
                 self.assertTrue(Path(result.call_saved_csv_path).exists())
+                self.assertTrue(Path(result.review_queue_csv_path).exists())
 
                 put_frame = pd.read_csv(result.put_saved_csv_path)
                 call_frame = pd.read_csv(result.call_saved_csv_path)
+                review_frame = pd.read_csv(result.review_queue_csv_path)
+                self.assertTrue((put_frame["run_id"] == "run-1").all())
+                self.assertTrue(put_frame["snapshot_ts"].notna().all())
+                self.assertTrue(
+                    put_frame["snapshot_ts"].astype(str).str.strip().ne("").all()
+                )
+                self.assertIn("stock_change_pct", put_frame.columns)
+                self.assertCountEqual(
+                    put_frame["stock_change_pct"].tolist(), [3.3, -1.1]
+                )
+                self.assertTrue((call_frame["run_id"] == "run-1").all())
+                self.assertTrue(call_frame["snapshot_ts"].notna().all())
+                self.assertTrue(
+                    call_frame["snapshot_ts"].astype(str).str.strip().ne("").all()
+                )
+                self.assertIn("stock_change_pct", call_frame.columns)
+                self.assertEqual(call_frame["stock_change_pct"].tolist(), [3.3])
+                self.assertTrue((review_frame["run_id"] == "run-1").all())
+                self.assertTrue(review_frame["snapshot_ts"].notna().all())
+                self.assertTrue(
+                    review_frame["snapshot_ts"].astype(str).str.strip().ne("").all()
+                )
                 self.assertCountEqual(
                     put_frame["symbol"].tolist(),
                     ["AAA", "IWM"],
@@ -540,8 +587,84 @@ class ScreenerRunServiceTests(unittest.TestCase):
                     call_frame["symbol"].tolist(),
                     ["AAA"],
                 )
+                self.assertCountEqual(
+                    review_frame["symbol"].tolist(),
+                    ["AAA", "IWM", "AAA"],
+                )
         finally:
             config.AUTO_SAVE_CSV = original_auto_save
+
+    def test_run_skips_review_queue_when_market_closed(self):
+        original_auto_save = config.AUTO_SAVE_CSV
+        original_auto_save_review_queue = config.AUTO_SAVE_REVIEW_QUEUE
+        original_review_queue_require_market_open = (
+            config.REVIEW_QUEUE_REQUIRE_MARKET_OPEN
+        )
+        try:
+            config.AUTO_SAVE_CSV = True
+            config.AUTO_SAVE_REVIEW_QUEUE = True
+            config.REVIEW_QUEUE_REQUIRE_MARKET_OPEN = True
+            with tempfile.TemporaryDirectory() as temp_dir:
+                service = ScreenerRunService(
+                    screener=FakeScreener(),
+                    analyzer_factory=FakeAnalyzer,
+                    scorer=lambda opportunities: opportunities,
+                    display_opportunities_fn=lambda opportunities: None,
+                    display_strategy_opportunities_fn=lambda opportunities, title: None,
+                    print_progress_fn=lambda message: None,
+                    opportunities_dir=temp_dir,
+                    review_queue_dir=temp_dir,
+                    enabled_option_sides=("put",),
+                )
+
+                result = service.run(
+                    api=FakeAPI(),
+                    run_id="run-1",
+                    snapshot_ts="2026-05-22T18:00:00",
+                    market_open=False,
+                )
+
+                self.assertTrue(result.success)
+                self.assertIsNone(result.review_queue_csv_path)
+        finally:
+            config.AUTO_SAVE_CSV = original_auto_save
+            config.AUTO_SAVE_REVIEW_QUEUE = original_auto_save_review_queue
+            config.REVIEW_QUEUE_REQUIRE_MARKET_OPEN = (
+                original_review_queue_require_market_open
+            )
+
+    def test_run_skips_review_queue_for_test_mode(self):
+        original_auto_save = config.AUTO_SAVE_CSV
+        original_auto_save_review_queue = config.AUTO_SAVE_REVIEW_QUEUE
+        try:
+            config.AUTO_SAVE_CSV = True
+            config.AUTO_SAVE_REVIEW_QUEUE = True
+            with tempfile.TemporaryDirectory() as temp_dir:
+                service = ScreenerRunService(
+                    screener=FakeScreener(),
+                    analyzer_factory=FakeAnalyzer,
+                    scorer=lambda opportunities: opportunities,
+                    display_opportunities_fn=lambda opportunities: None,
+                    display_strategy_opportunities_fn=lambda opportunities, title: None,
+                    print_progress_fn=lambda message: None,
+                    opportunities_dir=temp_dir,
+                    review_queue_dir=temp_dir,
+                    enabled_option_sides=("put",),
+                )
+
+                result = service.run(
+                    api=FakeAPI(),
+                    run_id="run-1",
+                    snapshot_ts="2026-05-22T12:00:00",
+                    market_open=True,
+                    capture_review_queue=False,
+                )
+
+                self.assertTrue(result.success)
+                self.assertIsNone(result.review_queue_csv_path)
+        finally:
+            config.AUTO_SAVE_CSV = original_auto_save
+            config.AUTO_SAVE_REVIEW_QUEUE = original_auto_save_review_queue
 
     def test_always_review_symbols_are_forced_into_analysis_outside_iv_screen(self):
         original_auto_save = config.AUTO_SAVE_CSV

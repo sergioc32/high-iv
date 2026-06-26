@@ -138,6 +138,11 @@ def main() -> None:
         action="store_true",
         help="Create weekly snapshot of trades and config parameters",
     )
+    parser.add_argument(
+        "--test-run",
+        action="store_true",
+        help="Run the screener without creating a trade-review queue.",
+    )
     strategy_group = parser.add_mutually_exclusive_group()
     strategy_group.add_argument(
         "--puts-only",
@@ -196,6 +201,9 @@ def main() -> None:
 
     market_open = is_market_open()
     _display_market_status(market_open)
+    if args.test_run:
+        print("TEST RUN: review-queue capture disabled for this run")
+        print()
 
     enabled_option_sides = ("put", "call")
     if args.puts_only:
@@ -211,6 +219,7 @@ def main() -> None:
         run_id=run_id,
         snapshot_ts=snapshot_ts,
         market_open=market_open,
+        capture_review_queue=not args.test_run,
     )
     if not screener_result.success:
         return

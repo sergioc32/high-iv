@@ -40,6 +40,7 @@ What this does:
 Expected outputs:
 - Open positions snapshot in trades/trades_open.csv
 - New opportunities file in opportunities/
+- New review queue file in opportunities_review/ when the market is open and the run is not a test run
 - Candidate evaluation log updated in opportunities/opportunity_candidates.csv
 - Rejection counters updated in rejections/rejections_tracking.csv
 
@@ -48,6 +49,7 @@ How to use it:
 - In `Top Put Spread Opportunities`, review only the best current setups. That section is for potential new entries.
 - Use the terminal table as the main decision surface.
 - Open the CSV only if you need to inspect more rows or verify a detail not shown in the CLI.
+- If you plan to record manual accept/skip decisions, update the newest file in `opportunities_review/`.
 
 What the CLI opportunity table is meant to tell you:
 - `Premium`: the current expected premium captured by the spread
@@ -87,6 +89,79 @@ Expected outputs:
 
 How to use it:
 - Use this as a lightweight intraday refresh to see whether better setups appeared
+
+### Review Queue Capture
+
+The review queue is the lightweight file used to record whether you actually wanted to take a surfaced trade.
+
+Location:
+- `opportunities_review/review_queue_YYYYMMDD_HHMMSS.csv`
+
+When it is created:
+- market must be open
+- run must not use `--test-run`
+
+What to edit:
+- `decision`
+- `decision_reason`
+- `decision_note`
+
+Leave all other columns unchanged.
+
+Allowed `decision` values:
+- `accepted`
+- `skipped`
+- `submitted_not_filled`
+- `deferred`
+
+Allowed `decision_reason` values:
+- `leveraged_etf`
+- `unfamiliar_symbol`
+- `sector_theme_discomfort`
+- `capital_constraint`
+- `too_many_similar_positions`
+- `fill_concern`
+- `earnings_event_concern`
+- `delta_concern`
+- `manual_risk_override`
+- `extended_too_fast`
+- `other`
+
+Suggested meaning for `too_many_similar_positions`:
+- Use when you already have enough exposure to a similar setup, sector theme, or the same underlying.
+- Example: you already have several `ORCL` spreads on and do not want to add more.
+
+Suggested meaning for `delta_concern`:
+- Use when the trade technically qualifies, but the short strike feels too close for comfort.
+- Example: the delta or strike proximity is tighter than you prefer, even if the spread still passes the screener.
+
+Suggested meaning for `extended_too_fast`:
+- Use when the setup technically qualifies, but the underlying has already run too far too quickly for comfort.
+- Example: the stock is already up about `10%` and you do not want to initiate a fresh trade there.
+
+Usage rules:
+- If `decision = accepted`, `decision_reason` is usually blank.
+- If `decision = skipped`, `decision_reason` should usually be filled in.
+- If `decision = submitted_not_filled`, `decision_reason` is optional but helpful.
+- If `decision = deferred`, `decision_reason` is optional.
+- `decision_note` is always optional.
+
+Suggested meaning for `extended_too_fast`:
+- Use when the setup technically qualifies, but the underlying has already run too far too quickly for comfort.
+- Example: the stock is already up about `10%` and you do not want to initiate a fresh trade there.
+
+### Test Run Mode
+
+If you are only experimenting or validating output and do not want a review queue:
+
+```bash
+python main.py --test-run
+```
+
+What this does:
+- runs the screener normally
+- suppresses review-queue creation
+- keeps test or exploratory runs from polluting manual decision data
 
 ### 3. Position-only Check (when you do not need a full screener run)
 Checklist:

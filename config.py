@@ -283,6 +283,30 @@ ORDER_HISTORY_MAX_PAGES = 2  # Default page cap for recent order retrieval
 MAX_SCREENING_RESULTS = 400  # Max stocks to show after IV screening
 MAX_FINAL_RESULTS = 30  # Max trade opportunities to display
 AUTO_SAVE_CSV = True  # Automatically save results to CSV file
+REVIEW_QUEUE_DIR = "opportunities_review"  # Separate folder for manual decision logs
+AUTO_SAVE_REVIEW_QUEUE = True  # Save post-run review queue for acceptance capture
+REVIEW_QUEUE_REQUIRE_MARKET_OPEN = (
+    True  # Skip review queue when results are only indicative
+)
+ALLOWED_REVIEW_DECISIONS = (
+    "accepted",
+    "skipped",
+    "submitted_not_filled",
+    "deferred",
+)
+ALLOWED_REVIEW_DECISION_REASONS = (
+    "leveraged_etf",
+    "unfamiliar_symbol",
+    "sector_theme_discomfort",
+    "capital_constraint",
+    "too_many_similar_positions",
+    "fill_concern",
+    "earnings_event_concern",
+    "delta_concern",
+    "manual_risk_override",
+    "extended_too_fast",
+    "other",
+)
 
 # Strategy version labeling for analysis/backtesting continuity
 STRATEGY_VERSION = "v2_dynamic"

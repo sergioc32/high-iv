@@ -9,6 +9,7 @@ from datetime import datetime
 from pathlib import Path
 
 from screener.strategy_types import PUT_CREDIT_SPREAD
+from utils.analytics_fields import MARKET_CONTEXT_FIELDS
 
 CANDIDATE_FIELDNAMES = [
     "run_id",
@@ -21,6 +22,7 @@ CANDIDATE_FIELDNAMES = [
     "short_leg_type",
     "long_leg_type",
     "symbol",
+    *MARKET_CONTEXT_FIELDS,
     "expiration_date",
     "dte",
     "stock_price",

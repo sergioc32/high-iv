@@ -4,11 +4,21 @@ from __future__ import annotations
 
 import argparse
 import csv
+import sys
 from collections import defaultdict
 from pathlib import Path
 from statistics import median
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from analysis.exposure_summary import (  # noqa: E402
+    build_exposure_concentration,
+    build_exposure_markdown_section,
+    build_exposure_metric_rows,
+)
+
 DEFAULT_EXECUTED_TRADES = PROJECT_ROOT / "analysis" / "executed_trade_dataset.csv"
 DEFAULT_REPORTS_DIR = PROJECT_ROOT / "analysis" / "reports"
 REPORT_CSV_COLUMNS = ["section", "dimension", "group", "metric", "value"]
@@ -27,6 +37,8 @@ SELECTOR_REVIEW_FIELDS = [
         "Always Review Forced Into Analysis",
     ),
     ("always_review_source", "Always Review Source"),
+    ("review_decision", "Review Decision"),
+    ("review_decision_reason", "Review Decision Reason"),
 ]
 
 
@@ -407,6 +419,18 @@ def build_markdown_report(
         lambda row: normalize_group_label(row.get("always_review_source")),
         top_n,
     )
+    review_decision_summary = build_group_summary(
+        closed_rows,
+        "review_decision",
+        lambda row: normalize_group_label(row.get("review_decision")),
+        top_n,
+    )
+    review_reason_summary = build_group_summary(
+        closed_rows,
+        "review_decision_reason",
+        lambda row: normalize_group_label(row.get("review_decision_reason")),
+        top_n,
+    )
     dte_summary = build_group_summary(
         feature_linked_rows,
         "dte_band",
@@ -434,6 +458,11 @@ def build_markdown_report(
         closed_rows,
         cohort_name="closed_trades",
     )
+    exposure_concentration_rows = build_exposure_concentration(
+        open_rows=open_rows,
+        closed_rows=closed_rows,
+        top_n=top_n,
+    )
 
     lines = [
         "# Trade Outcome Review",
@@ -449,8 +478,19 @@ def build_markdown_report(
         f"- Feature-linked closed trades: {len(feature_linked_rows)}",
         f"- Trade-only closed trades: {len(trade_only_rows)}",
         "",
-        "## Cohort Comparison",
     ]
+    lines.extend(
+        build_exposure_markdown_section(
+            exposure_concentration_rows,
+            markdown_table,
+        )
+    )
+    lines.extend(
+        [
+            "",
+            "## Cohort Comparison",
+        ]
+    )
     lines.extend(
         markdown_table(
             ["Cohort", "Trades", "Win Rate", "Avg PnL", "Median PnL", "Total PnL"],
@@ -752,6 +792,40 @@ def build_markdown_report(
             ],
         )
     )
+    lines.extend(["", "### Review Decision"])
+    lines.extend(
+        markdown_table(
+            ["Decision", "Trades", "Win Rate", "Avg PnL", "Median PnL", "Total PnL"],
+            [
+                [
+                    row["review_decision"],
+                    row["trade_count"],
+                    row["win_rate"],
+                    row["avg_pnl"],
+                    row["median_pnl"],
+                    row["total_pnl"],
+                ]
+                for row in review_decision_summary
+            ],
+        )
+    )
+    lines.extend(["", "### Review Decision Reason"])
+    lines.extend(
+        markdown_table(
+            ["Reason", "Trades", "Win Rate", "Avg PnL", "Median PnL", "Total PnL"],
+            [
+                [
+                    row["review_decision_reason"],
+                    row["trade_count"],
+                    row["win_rate"],
+                    row["avg_pnl"],
+                    row["median_pnl"],
+                    row["total_pnl"],
+                ]
+                for row in review_reason_summary
+            ],
+        )
+    )
     lines.extend(["", "## Feature-Linked DTE Segmentation"])
     lines.extend(
         markdown_table(
@@ -838,7 +912,9 @@ def build_markdown_report(
 
 
 def build_metrics_rows(
-    closed_rows: list[dict[str, str]], top_n: int
+    closed_rows: list[dict[str, str]],
+    top_n: int,
+    open_rows: list[dict[str, str]] | None = None,
 ) -> list[list[str]]:
     """Build flattened CSV metric rows."""
     rows: list[list[str]] = []
@@ -868,6 +944,11 @@ def build_metrics_rows(
     selector_coverage_rows = build_field_coverage_rows(
         closed_rows,
         cohort_name="closed_trades",
+    )
+    exposure_rows = build_exposure_concentration(
+        open_rows=open_rows or [],
+        closed_rows=closed_rows,
+        top_n=top_n,
     )
 
     group_specs = [
@@ -927,6 +1008,14 @@ def build_metrics_rows(
         (
             "always_review_source",
             lambda row: normalize_group_label(row.get("always_review_source")),
+        ),
+        (
+            "review_decision",
+            lambda row: normalize_group_label(row.get("review_decision")),
+        ),
+        (
+            "review_decision_reason",
+            lambda row: normalize_group_label(row.get("review_decision_reason")),
         ),
         ("dte_band", lambda row: dte_band(row.get("dte"))),
         ("delta_band", lambda row: delta_band(row.get("short_delta"))),
@@ -993,6 +1082,7 @@ def build_metrics_rows(
                 row["share"],
             ]
         )
+    rows.extend(build_exposure_metric_rows(exposure_rows))
     return rows
 
 
@@ -1052,7 +1142,7 @@ def main() -> None:
     )
     markdown_output_path.parent.mkdir(parents=True, exist_ok=True)
     markdown_output_path.write_text(report_text, encoding="utf-8")
-    metric_rows = build_metrics_rows(closed_rows, args.top_n)
+    metric_rows = build_metrics_rows(closed_rows, args.top_n, open_rows=open_rows)
     write_csv(csv_output_path, REPORT_CSV_COLUMNS, metric_rows)
 
     print(f"Trade outcome markdown report written to: {markdown_output_path}")

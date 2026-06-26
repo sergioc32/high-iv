@@ -15,6 +15,29 @@ import requests
 import config
 from utils import cache
 
+
+def _first_float(payload: dict, *keys: str) -> float | None:
+    """Return the first present numeric value from a quote payload."""
+    for key in keys:
+        value = payload.get(key)
+        if value in (None, ""):
+            continue
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _compute_change_pct(
+    last_price: float | None, prev_close: float | None
+) -> float | None:
+    """Compute signed day change percentage from last price and previous close."""
+    if last_price is None or prev_close is None or prev_close == 0:
+        return None
+    return ((last_price - prev_close) / prev_close) * 100.0
+
+
 # Fallback S&P 500 symbols (top liquid names) if watchlist fails
 SP500_FALLBACK = [
     "AAPL",
@@ -406,6 +429,8 @@ class TastytradeAPI:
                     if (
                         "earnings_date" not in cached
                         or "market_cap" not in cached
+                        or "sector" not in cached
+                        or "industry" not in cached
                         or "liquidity_rank" not in cached
                         or "option_expiration_ivs" not in cached
                     ):
@@ -458,6 +483,8 @@ class TastytradeAPI:
                         "market_cap": float(market_cap_raw)
                         if market_cap_raw is not None
                         else None,
+                        "sector": item.get("sector") or item.get("sector-name"),
+                        "industry": item.get("industry") or item.get("industry-name"),
                         "earnings_date": earnings_date,
                     }
                     metrics_by_symbol[symbol] = record
@@ -487,13 +514,23 @@ class TastytradeAPI:
                 return None
 
             quote = items[0]
+            last_price = float(quote.get("last")) if quote.get("last") else None
+            prev_close = _first_float(
+                quote,
+                "prev-close",
+                "prev_close",
+                "previous-close",
+                "previous_close",
+            )
 
             return {
                 "symbol": symbol,
-                "last_price": float(quote.get("last")) if quote.get("last") else None,
+                "last_price": last_price,
                 "bid": float(quote.get("bid")) if quote.get("bid") else None,
                 "ask": float(quote.get("ask")) if quote.get("ask") else None,
                 "volume": float(quote.get("volume")) if quote.get("volume") else None,
+                "prev_close": prev_close,
+                "stock_change_pct": _compute_change_pct(last_price, prev_close),
             }
 
         except requests.exceptions.RequestException as e:
@@ -562,16 +599,24 @@ class TastytradeAPI:
             or quote_item.get("market-capitalization")
             or quote_item.get("marketCapitalization")
         )
+        last_price = float(quote_item.get("last")) if quote_item.get("last") else None
+        prev_close = _first_float(
+            quote_item,
+            "prev-close",
+            "prev_close",
+            "previous-close",
+            "previous_close",
+        )
         return {
             "symbol": requested_symbol,
-            "last_price": float(quote_item.get("last"))
-            if quote_item.get("last")
-            else None,
+            "last_price": last_price,
             "bid": float(quote_item.get("bid")) if quote_item.get("bid") else None,
             "ask": float(quote_item.get("ask")) if quote_item.get("ask") else None,
             "volume": float(quote_item.get("volume"))
             if quote_item.get("volume")
             else None,
+            "prev_close": prev_close,
+            "stock_change_pct": _compute_change_pct(last_price, prev_close),
             "market_cap": float(market_cap_raw) if market_cap_raw else None,
             "year_high_price": float(quote_item.get("year-high-price"))
             if quote_item.get("year-high-price")

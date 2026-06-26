@@ -25,6 +25,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import config  # noqa: E402
+from utils.analytics_fields import MARKET_CONTEXT_FIELDS  # noqa: E402
 
 CANDIDATES_PATH = PROJECT_ROOT / "opportunities" / "opportunity_candidates.csv"
 TRADES_OPEN_PATH = PROJECT_ROOT / "trades" / "trades_open.csv"
@@ -34,6 +35,11 @@ DAILY_OPPORTUNITIES_GLOBS = (
     str(PROJECT_ROOT / "opportunities" / "opportunities_*.csv"),
     str(PROJECT_ROOT / "opportunities" / "put_spread_opportunities_*.csv"),
     str(PROJECT_ROOT / "opportunities" / "call_spread_opportunities_*.csv"),
+)
+REVIEW_QUEUE_GLOB = str(
+    PROJECT_ROOT
+    / getattr(config, "REVIEW_QUEUE_DIR", "opportunities_review")
+    / "review_queue_*.csv"
 )
 
 # Max calendar-day gap between candidate run date and trade entry date.
@@ -54,6 +60,7 @@ OUTPUT_COLUMNS = [
     "short_leg_type",
     "long_leg_type",
     "symbol",
+    *MARKET_CONTEXT_FIELDS,
     "expiration_date",
     "dte",
     "stock_price",
@@ -106,6 +113,11 @@ OUTPUT_COLUMNS = [
     "always_review_symbol",
     "always_review_forced_into_analysis",
     "always_review_source",
+    "review_decision",
+    "review_decision_reason",
+    "review_decision_note",
+    "review_queue_file",
+    "review_queue_row",
     # --- Candidate selection ---
     "candidate_status",
     "selected",
@@ -177,6 +189,7 @@ _CANDIDATE_PASSTHROUGH = [
     "short_leg_type",
     "long_leg_type",
     "symbol",
+    *MARKET_CONTEXT_FIELDS,
     "expiration_date",
     "dte",
     "stock_price",
@@ -208,6 +221,7 @@ _DAILY_OPPORTUNITY_PASSTHROUGH = [
     "strategy_id",
     "option_side",
     "directional_bias",
+    *MARKET_CONTEXT_FIELDS,
     "alignment_score_version",
     "strategy_alignment_score",
     "total_rank_score",
@@ -396,6 +410,28 @@ def _make_symbol_expiration_key(symbol: str, expiration: str) -> tuple[str, str]
     return (symbol.strip(), expiration.strip())
 
 
+def _make_review_queue_key(
+    *,
+    run_id: str,
+    snapshot_ts: str,
+    strategy_id: str,
+    symbol: str,
+    expiration_date: str,
+    short_strike: str,
+    long_strike: str,
+) -> tuple[str, str, str, str, str, str, str]:
+    """Build a stable identity key for review-queue decisions."""
+    return (
+        run_id.strip(),
+        snapshot_ts.strip(),
+        strategy_id.strip(),
+        symbol.strip(),
+        expiration_date.strip(),
+        _normalize_strike(short_strike),
+        _normalize_strike(long_strike),
+    )
+
+
 def _daily_opportunity_run_id(filename: str) -> str:
     """Extract run id from a daily opportunities filename when present."""
     match = re.search(
@@ -522,6 +558,53 @@ def _load_daily_opportunities_index() -> dict[date, list[dict]]:
                 index.setdefault(file_date, []).append(row)
 
     return index
+
+
+def _load_review_queue_lookup() -> dict[tuple[str, str, str, str, str, str, str], dict]:
+    """Load review-queue rows and index them by stable candidate identity."""
+    lookup: dict[tuple[str, str, str, str, str, str, str], dict] = {}
+    for path in sorted(glob.glob(REVIEW_QUEUE_GLOB)):
+        filename = os.path.basename(path)
+        with open(path, newline="", encoding="utf-8") as fh:
+            reader = csv.DictReader(fh)
+            for row_index, row in enumerate(reader, start=1):
+                key = _make_review_queue_key(
+                    run_id=row.get("run_id", ""),
+                    snapshot_ts=row.get("snapshot_ts", ""),
+                    strategy_id=row.get("strategy_id", ""),
+                    symbol=row.get("symbol", ""),
+                    expiration_date=row.get("expiration_date", ""),
+                    short_strike=row.get("short_strike", ""),
+                    long_strike=row.get("long_strike", ""),
+                )
+                if not any(key):
+                    continue
+                row["_source_file"] = filename
+                row["_row_index"] = str(row_index)
+                lookup[key] = row
+    return lookup
+
+
+def _enrich_with_review_queue_match(row: dict, candidate: dict) -> None:
+    """Attach manual review-queue decisions to a candidate-backed analytics row."""
+    key = _make_review_queue_key(
+        run_id=candidate.get("run_id", ""),
+        snapshot_ts=candidate.get("snapshot_ts", ""),
+        strategy_id=candidate.get("strategy_id", ""),
+        symbol=candidate.get("symbol", ""),
+        expiration_date=candidate.get("expiration_date", ""),
+        short_strike=candidate.get("short_strike", ""),
+        long_strike=candidate.get("long_strike", ""),
+    )
+    review_row = build_output_row.review_queue_lookup.get(key)
+    if not review_row:
+        return
+
+    row["review_decision"] = review_row.get("decision", "")
+    row["review_decision_reason"] = review_row.get("decision_reason", "")
+    row["review_decision_note"] = review_row.get("decision_note", "")
+    row["review_queue_file"] = review_row.get("_source_file", "")
+    row["review_queue_row"] = review_row.get("_row_index", "")
 
 
 def _promote_trade_only_match_from_daily_context(row: dict) -> None:
@@ -915,6 +998,7 @@ def build_output_row(candidate: dict, trade: dict | None, match_status: str) -> 
         row[col] = candidate.get(col, "")
 
     row["strategy_version"] = _candidate_strategy_version(candidate)
+    _enrich_with_review_queue_match(row, candidate)
 
     row["match_status"] = match_status
 
@@ -1063,7 +1147,9 @@ def build_analysis_dataset() -> None:
 
     candidates = load_csv(CANDIDATES_PATH)
     daily_index = _load_daily_opportunities_index()
+    review_queue_lookup = _load_review_queue_lookup()
     build_output_row.daily_index = daily_index
+    build_output_row.review_queue_lookup = review_queue_lookup
     earliest_candidate_date = _min_candidate_run_date(candidates)
     open_trades = _deduplicate_open_trades(load_csv(TRADES_OPEN_PATH))
     closed_trades = load_csv(TRADES_CLOSED_PATH)

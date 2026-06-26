@@ -34,6 +34,12 @@ Candidate-level, entry-time dataset. One row per evaluated spread candidate.
 - short_leg_type: string, optional, example `short_put`, `short_call`
 - long_leg_type: string, optional, example `long_put`, `long_call`
 - symbol: string, required
+- sector: string, optional, TastyTrade market-metrics sector classification
+- industry: string, optional, TastyTrade market-metrics industry classification
+- risk_theme_tags: string, optional, stable comma-separated risk tags
+- technical_theme_tags: string, optional, stable comma-separated technical tags
+- theme_tags: string, optional, combined risk and technical tags
+- theme_taxonomy_version: string, optional for legacy rows and required for newly tagged rows
 - expiration_date: string, required, YYYY-MM-DD
 - dte: integer, required, days
 - stock_price: float, required, USD
@@ -76,6 +82,22 @@ Candidate-level, entry-time dataset. One row per evaluated spread candidate.
 - selected: boolean, required
 - rejection_reason_primary: string, optional
 - rejection_reason_flags: string, optional
+
+### Theme taxonomy v1
+- Business themes are intentionally not classified in v1.
+- Risk theme tags:
+  - `high_iv_rank_70_plus`: IV rank is at least 70.
+  - `extreme_iv_rank_90_plus`: IV rank is at least 90.
+  - `small_cap`: market cap is positive and below $10 billion.
+  - `speculative_small_cap_high_iv`: both `small_cap` and `high_iv_rank_70_plus` apply.
+  - `earnings_exposure`: an earnings date falls within the spread DTE.
+- Technical theme tags:
+  - `near_52w_high`: range position is at least 0.80.
+  - `near_52w_high_extended`: range position is at least 0.90.
+  - `near_52w_low`: range position is at most 0.20.
+  - `near_52w_low_distressed`: range position is at most 0.10.
+  - `extreme_momentum`: absolute 90-day price change exceeds 75%; this remains absent until a real `price_change_90d` value is collected.
+- `theme_tags` is the stable concatenation of risk tags followed by technical tags.
 
 ### Candidate status rules
 - selected=True => candidate_status must be selected.
@@ -126,6 +148,12 @@ Use one candidate row as five blocks:
 - range_position_52w
 - distance_to_52w_high_pct
 - distance_to_52w_low_pct
+- sector
+- industry
+- risk_theme_tags
+- technical_theme_tags
+- theme_tags
+- theme_taxonomy_version
 
 3. Trade economics: what does the spread pay and risk?
 - credit_mid: midpoint-based credit estimate

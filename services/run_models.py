@@ -40,3 +40,4 @@ class ScreenerRunResult:
     saved_csv_path: str | None = None
     put_saved_csv_path: str | None = None
     call_saved_csv_path: str | None = None
+    review_queue_csv_path: str | None = None

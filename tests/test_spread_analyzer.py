@@ -11,6 +11,14 @@ from screener.spread_analyzer import SpreadAnalyzer
 def build_valid_chain() -> dict:
     return {
         "symbol": "XYZ",
+        "underlying_quote": {
+            "sector": "Technology",
+            "industry": "Semiconductors",
+            "iv_rank": 85,
+            "market_cap": 5_000_000_000,
+            "year_high_price": 122.0,
+            "year_low_price": 80.0,
+        },
         "strikes": {
             100.0: {
                 "put": {
@@ -200,6 +208,43 @@ class SpreadAnalyzerTests(unittest.TestCase):
                 "skew_diff",
             }
             self.assertTrue(expected_keys.issubset(opportunity.keys()))
+            self.assertEqual(opportunity["sector"], "Technology")
+            self.assertEqual(opportunity["industry"], "Semiconductors")
+            self.assertEqual(
+                opportunity["risk_theme_tags"],
+                "high_iv_rank_70_plus,small_cap,speculative_small_cap_high_iv",
+            )
+            self.assertEqual(
+                opportunity["technical_theme_tags"],
+                "near_52w_high,near_52w_high_extended",
+            )
+            self.assertEqual(
+                opportunity["theme_tags"],
+                "high_iv_rank_70_plus,small_cap,speculative_small_cap_high_iv,"
+                "near_52w_high,near_52w_high_extended",
+            )
+            self.assertEqual(opportunity["theme_taxonomy_version"], "v1")
+
+            with analyzer.candidate_logger.path.open(
+                newline="", encoding="utf-8"
+            ) as handle:
+                candidate = list(csv.DictReader(handle))[-1]
+            self.assertEqual(candidate["sector"], "Technology")
+            self.assertEqual(candidate["industry"], "Semiconductors")
+            self.assertEqual(
+                candidate["risk_theme_tags"],
+                "high_iv_rank_70_plus,small_cap,speculative_small_cap_high_iv",
+            )
+            self.assertEqual(
+                candidate["technical_theme_tags"],
+                "near_52w_high,near_52w_high_extended",
+            )
+            self.assertEqual(
+                candidate["theme_tags"],
+                "high_iv_rank_70_plus,small_cap,speculative_small_cap_high_iv,"
+                "near_52w_high,near_52w_high_extended",
+            )
+            self.assertEqual(candidate["theme_taxonomy_version"], "v1")
 
     def test_invalid_candidate_logs_rejection_reason(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
