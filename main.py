@@ -29,7 +29,7 @@ def _print_position_sync_result(result) -> None:
         print(f"X {result.message}")
         return
 
-    print(f"OK Found {result.spreads_count} put credit spreads")
+    print(f"OK Found {result.spreads_count} credit spreads")
     print()
     print(result.display_df.to_string(index=False))
     print()
@@ -75,7 +75,166 @@ def _print_position_sync_result(result) -> None:
     print()
 
 
-def sync_positions(api) -> None:
+def _print_loss_close_review(result) -> None:
+    if len(result.loss_close_review_df) == 0:
+        return
+
+    print("=" * 80)
+    print(f"LOSS CLOSE REVIEW (>={config.LOSS_CLOSE_REVIEW_PCT}% OF CREDIT)")
+    print("=" * 80)
+    print(
+        "Estimated P/L breached the loss threshold and live option quotes confirmed it."
+    )
+    print()
+    for idx, (_, row) in enumerate(result.loss_close_review_df.iterrows(), start=1):
+        print(
+            f"{idx}. {row['symbol']} {row['short_strike']}/{row['long_strike']} "
+            f"{str(row.get('option_side') or '').upper()} | "
+            f"Est P/L {row['current_pnl_pct']:.1f}% (${row['current_pnl']:.2f}) | "
+            f"Live P/L {row['live_pnl_pct']:.1f}% (${row['live_pnl']:.2f}) | "
+            f"Limit debit ${row['close_limit_price']:.2f}"
+        )
+    print()
+
+
+def _normalize_order_text(value) -> str:
+    return str(value or "").strip().lower().replace("_", " ")
+
+
+def _is_active_close_order(order: dict) -> bool:
+    terminal_statuses = {
+        "cancelled",
+        "canceled",
+        "expired",
+        "filled",
+        "rejected",
+        "removed",
+    }
+    status = _normalize_order_text(order.get("status"))
+    if status in terminal_statuses:
+        return False
+
+    legs = order.get("legs")
+    if not isinstance(legs, list):
+        return False
+    actions = {_normalize_order_text(leg.get("action")) for leg in legs}
+    return "buy to close" in actions and "sell to close" in actions
+
+
+def _order_leg_symbols(order: dict) -> set[str]:
+    legs = order.get("legs")
+    if not isinstance(legs, list):
+        return set()
+    return {str(leg.get("symbol") or "").strip() for leg in legs if leg.get("symbol")}
+
+
+def _find_working_close_order(row, orders: list[dict]) -> dict | None:
+    target_symbols = {
+        str(row.get("short_option_symbol") or "").strip(),
+        str(row.get("long_option_symbol") or "").strip(),
+    }
+    if "" in target_symbols:
+        return None
+
+    for order in orders:
+        if not _is_active_close_order(order):
+            continue
+        if target_symbols.issubset(_order_leg_symbols(order)):
+            return order
+    return None
+
+
+def _order_display_value(order: dict, *keys: str, default: str = "") -> str:
+    for key in keys:
+        value = order.get(key)
+        if value not in (None, ""):
+            return str(value)
+    return default
+
+
+def _prompt_and_close_loss_candidates(api, result) -> None:
+    if len(result.loss_close_review_df) == 0:
+        return
+
+    _print_loss_close_review(result)
+    recent_orders = api.get_account_orders(statuses=[])
+    pending_rows = []
+    prompt_rows = []
+    for _, row in result.loss_close_review_df.iterrows():
+        working_order = _find_working_close_order(row, recent_orders)
+        if working_order is None:
+            prompt_rows.append(row)
+        else:
+            pending_rows.append((row, working_order))
+
+    if pending_rows:
+        print("=" * 80)
+        print("WORKING CLOSE ORDERS")
+        print("=" * 80)
+        for row, order in pending_rows:
+            order_id = _order_display_value(order, "id", "order-id", default="unknown")
+            status = _order_display_value(order, "status", default="working")
+            price = _order_display_value(order, "price", default="?")
+            print(
+                f"- {row['symbol']} {row['short_strike']}/{row['long_strike']}: "
+                f"loss still confirmed at {row['live_pnl_pct']:.1f}%, "
+                f"but close order {order_id} is already {status} at ${price} debit."
+            )
+        print()
+
+    if not prompt_rows:
+        print(
+            "No duplicate close orders submitted; review working orders if prices need adjustment."
+        )
+        print()
+        return
+
+    print("Running order dry-runs before asking for approval...")
+    dry_run_results = []
+    for row in prompt_rows:
+        payload = row.get("close_order_payload")
+        if not isinstance(payload, dict):
+            dry_run_results.append((row, None))
+            continue
+        dry_run_results.append((row, api.dry_run_order(payload)))
+
+    valid_rows = [
+        (row, dry_run) for row, dry_run in dry_run_results if dry_run is not None
+    ]
+    if not valid_rows:
+        print("X No close orders passed dry-run validation. No orders submitted.")
+        print()
+        return
+
+    invalid_count = len(dry_run_results) - len(valid_rows)
+    if invalid_count:
+        print(f"X {invalid_count} close order(s) failed dry-run and will be skipped.")
+    print(f"{len(valid_rows)} close order(s) passed dry-run.")
+    print()
+    answer = input("Submit these close orders now? Type YES to submit: ").strip()
+    if answer != "YES":
+        print("No close orders submitted.")
+        print()
+        return
+
+    for row, _ in valid_rows:
+        payload = row.get("close_order_payload")
+        response = api.submit_order(payload)
+        if response is None:
+            print(
+                f"X Failed to submit close order for {row['symbol']} "
+                f"{row['short_strike']}/{row['long_strike']}"
+            )
+            continue
+        print(
+            f"OK Submitted close order for {row['symbol']} "
+            f"{row['short_strike']}/{row['long_strike']} at "
+            f"${row['close_limit_price']:.2f} debit"
+        )
+    print()
+
+
+def sync_positions(api, *, prompt_for_loss_closes: bool = True):
     """
     Sync current account positions and update trades_open.csv.
     Shows current P&L and alerts for positions at or above the profit target.
@@ -88,6 +247,9 @@ def sync_positions(api) -> None:
 
     result = PositionSyncService().sync_positions(api)
     _print_position_sync_result(result)
+    if prompt_for_loss_closes:
+        _prompt_and_close_loss_candidates(api, result)
+    return result
 
 
 def _build_authenticated_api(
@@ -179,18 +341,13 @@ def main() -> None:
         print()
 
     api: TastytradeAPI | None = None
-    if args.fresh_day or args.sync_positions:
+    if args.sync_positions and not args.fresh_day:
         api = _build_authenticated_api(auth_failure_message="Authentication failed")
         if api is None:
             return
 
         sync_positions(api)
-
-        if args.sync_positions and not args.fresh_day:
-            return
-
-        print("Continuing to opportunity screener...")
-        print()
+        return
 
     print_header()
 
@@ -223,6 +380,8 @@ def main() -> None:
     )
     if not screener_result.success:
         return
+
+    sync_positions(api)
 
     execution_time = time.time() - start_time
     display_summary(

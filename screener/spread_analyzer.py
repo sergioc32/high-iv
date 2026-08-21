@@ -27,7 +27,6 @@ from screener.spread_scoring import (
     abs_delta,
     compute_ev_score,
     compute_spread_metrics,
-    format_rejection_summary,
     normalize_iv,
     to_float,
 )
@@ -367,10 +366,6 @@ class PutSpreadAnalyzer:
         chain: dict[str, Any], target_strike: float | None
     ) -> dict[str, Any]:
         return get_put_by_strike(chain, target_strike)
-
-    @staticmethod
-    def _format_rejection_summary(rejections: dict[str, int]) -> str:
-        return format_rejection_summary(rejections)
 
     def _extract_short_delta(self, put_data: dict[str, Any] | None) -> float | None:
         if not put_data:
@@ -954,11 +949,6 @@ class PutSpreadAnalyzer:
                         rejection_data
                     )
                     self.log_rejections(debug_symbol, rejection_data)
-                    rejection_summary = self._format_rejection_summary(rejection_data)
-                    print(
-                        f"\n   x {debug_symbol}: No valid spreads found. Rejections: "
-                        f"{rejection_summary}"
-                    )
             return None
 
         selection = self._select_best_candidate(

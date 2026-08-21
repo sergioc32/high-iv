@@ -56,6 +56,7 @@ class PositionSyncService:
         self._coerce_numeric_fields(df)
         self._enrich_with_quotes(api, df)
         df["exit_signal"] = df.apply(self._exit_signal, axis=1)
+        loss_close_review_df = self._build_loss_close_review_df(api, df)
 
         prev_df = self._load_existing_open_trades()
         closed_trade_messages: list[str] = []
@@ -74,6 +75,7 @@ class PositionSyncService:
             positions_df=df,
             display_df=self._build_display_df(df),
             profit_targets_df=df[df["current_pnl_pct"] >= config.TARGET_PROFIT_PCT],
+            loss_close_review_df=loss_close_review_df,
             dte_warnings_df=df[df["dte_remaining"] <= 21],
             exit_alerts_df=df[df["exit_signal"] != "HOLD"],
             trades_file=str(self.trades_file),
@@ -125,13 +127,123 @@ class PositionSyncService:
             lambda symbol: (quotes.get(symbol) or {}).get("last_price")
         )
         df["short_strike_breached"] = df.apply(
-            lambda row: (
-                row.get("stock_price") is not None
-                and row.get("short_strike") is not None
-                and row.get("stock_price") <= row.get("short_strike")
-            ),
+            self._is_short_strike_breached,
             axis=1,
         )
+
+    def _build_loss_close_review_df(self, api, df: pd.DataFrame) -> pd.DataFrame:
+        estimated_candidates = df[
+            df["current_pnl_pct"] <= -float(config.LOSS_CLOSE_REVIEW_PCT)
+        ].copy()
+        if estimated_candidates.empty:
+            return estimated_candidates
+
+        required_columns = {"short_option_symbol", "long_option_symbol"}
+        if not required_columns.issubset(set(estimated_candidates.columns)):
+            return estimated_candidates.iloc[0:0]
+
+        option_symbols = sorted(
+            {
+                str(symbol)
+                for symbol in (
+                    list(estimated_candidates["short_option_symbol"])
+                    + list(estimated_candidates["long_option_symbol"])
+                )
+                if str(symbol or "").strip()
+            }
+        )
+        option_quotes = api.get_option_quotes(option_symbols, force_refresh=True)
+        review_rows: list[dict[str, object]] = []
+        for _, row in estimated_candidates.iterrows():
+            live_metrics = self._live_close_metrics(row, option_quotes)
+            if live_metrics is None:
+                continue
+            if live_metrics["live_pnl_pct"] > -float(config.LOSS_CLOSE_REVIEW_PCT):
+                continue
+            review_row = row.to_dict()
+            review_row.update(live_metrics)
+            review_row["close_order_payload"] = api.build_close_vertical_order(
+                short_option_symbol=str(row["short_option_symbol"]),
+                long_option_symbol=str(row["long_option_symbol"]),
+                limit_debit=float(live_metrics["close_limit_price"]),
+            )
+            review_rows.append(review_row)
+
+        return pd.DataFrame(review_rows)
+
+    @staticmethod
+    def _quote_mid(quote: dict[str, object]) -> float | None:
+        bid = quote.get("bid")
+        ask = quote.get("ask")
+        try:
+            if bid is not None and ask is not None:
+                return (float(bid) + float(ask)) / 2
+            if bid is not None:
+                return float(bid)
+            if ask is not None:
+                return float(ask)
+        except (TypeError, ValueError):
+            return None
+        return None
+
+    @classmethod
+    def _live_close_metrics(
+        cls, row: pd.Series, option_quotes: dict[str, dict]
+    ) -> dict[str, float] | None:
+        short_quote = option_quotes.get(str(row.get("short_option_symbol") or ""))
+        long_quote = option_quotes.get(str(row.get("long_option_symbol") or ""))
+        if not short_quote or not long_quote:
+            return None
+
+        short_ask = short_quote.get("ask")
+        long_bid = long_quote.get("bid")
+        try:
+            natural_debit = (
+                float(short_ask) - float(long_bid)
+                if short_ask is not None and long_bid is not None
+                else None
+            )
+        except (TypeError, ValueError):
+            natural_debit = None
+
+        short_mid = cls._quote_mid(short_quote)
+        long_mid = cls._quote_mid(long_quote)
+        mid_debit = (
+            (short_mid - long_mid)
+            if short_mid is not None and long_mid is not None
+            else None
+        )
+        close_debit_per_contract = (
+            natural_debit if natural_debit is not None else mid_debit
+        )
+        if close_debit_per_contract is None:
+            return None
+
+        live_mark = max(0.0, close_debit_per_contract * 100)
+        entry_credit = float(row.get("entry_credit"))
+        if entry_credit <= 0:
+            return None
+
+        live_pnl = entry_credit - live_mark
+        live_pnl_pct = (live_pnl / entry_credit) * 100
+        return {
+            "live_mark": round(live_mark, 2),
+            "live_pnl": round(live_pnl, 2),
+            "live_pnl_pct": round(live_pnl_pct, 1),
+            "live_debit_per_contract": round(close_debit_per_contract, 2),
+            "close_limit_price": round(close_debit_per_contract, 2),
+        }
+
+    @staticmethod
+    def _is_short_strike_breached(row: pd.Series) -> bool:
+        stock_price = row.get("stock_price")
+        short_strike = row.get("short_strike")
+        if stock_price is None or short_strike is None:
+            return False
+        option_side = str(row.get("option_side") or "put").strip().lower()
+        if option_side == "call":
+            return stock_price >= short_strike
+        return stock_price <= short_strike
 
     @staticmethod
     def _exit_signal(row: pd.Series) -> str:
@@ -365,6 +477,12 @@ class PositionSyncService:
 
         record = {
             "trade_id": trade_id,
+            "strategy_id": row.get("strategy_id"),
+            "strategy_family": row.get("strategy_family"),
+            "option_side": row.get("option_side"),
+            "directional_bias": row.get("directional_bias"),
+            "short_leg_type": row.get("short_leg_type"),
+            "long_leg_type": row.get("long_leg_type"),
             "symbol": row.get("symbol"),
             "entry_date": row.get("entry_date"),
             "close_date": close_date.isoformat(),
@@ -425,6 +543,12 @@ class PositionSyncService:
     def _closed_trade_columns() -> list[str]:
         return [
             "trade_id",
+            "strategy_id",
+            "strategy_family",
+            "option_side",
+            "directional_bias",
+            "short_leg_type",
+            "long_leg_type",
             "symbol",
             "entry_date",
             "close_date",

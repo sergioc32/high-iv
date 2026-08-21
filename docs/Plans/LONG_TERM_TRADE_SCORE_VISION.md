@@ -52,6 +52,17 @@ What is still missing:
 - rejected opportunities are not yet modeled as possible future recovery opportunities
 - the current ML work only sees executed trades, which creates selection bias
 
+What is now in place to support the next stage:
+
+- strategic always-review coverage for `SPY`, `QQQ`, and `IWM`
+- a lightweight review queue for actionable runs
+- explicit operator decision capture for:
+  - `accepted`
+  - `skipped`
+  - `submitted_not_filled`
+  - `deferred`
+- review decisions now flow into analytics and reporting, even though the history is still near-zero
+
 ## Important Constraint: Capital Matters
 
 The account size matters and should shape the system.
@@ -143,6 +154,11 @@ This matters because:
 This is not the same thing as forcing a trade.
 It is about guaranteeing analysis coverage for a small strategic universe.
 
+Current implementation note:
+
+- the always-review universe is now active for `SPY`, `QQQ`, and `IWM`
+- these symbols are guaranteed analysis coverage, not guaranteed opportunities
+
 ## Long-Term Score Architecture
 
 The eventual system should likely be layered, not one single monolithic score.
@@ -195,6 +211,16 @@ This should eventually learn from:
 - explicit skip reasons
 - instrument-type preferences
 - known discomfort areas
+
+Current implementation note:
+
+- the first review-queue capture flow is now live
+- operator decisions are recorded in `opportunities_review/`
+- only three manual fields are edited:
+  - `decision`
+  - `decision_reason`
+  - `decision_note`
+- this is the beginning of the acceptance dataset, not a mature model-ready history yet
 
 ### 5. Fillability Model
 

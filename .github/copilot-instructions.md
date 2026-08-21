@@ -6,7 +6,7 @@ applyTo: '**/*.py'
 # Python Coding Conventions
 
 ## Python Instructions
-
+- Use the python virtual env at .\venv or the full path is C:\Users\sergi\development\highIV\venv
 - Write clear and concise comments for each function.
 - Ensure functions have descriptive names and include type hints.
 - Provide docstrings following PEP 257 conventions.

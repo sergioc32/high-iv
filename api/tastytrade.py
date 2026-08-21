@@ -180,6 +180,8 @@ class TastytradeAPI:
 
     def _print_postman_setup(self, authorization_value: str) -> None:
         """Print Postman Authorization header details for manual API testing."""
+        if not getattr(config, "PRINT_POSTMAN_AUTH_HEADER", False):
+            return
         print("=" * 80)
         print("📋 POSTMAN SETUP - Copy this token for Authorization header:")
         print("=" * 80)
@@ -803,9 +805,9 @@ class TastytradeAPI:
                     "strike_price": strike,
                 }
 
-            print(
-                f"✓ Retrieved {len(chain['strikes'])} strikes for {symbol} exp {expiration_date}"
-            )
+            # print(
+            #     f"✓ Retrieved {len(chain['strikes'])} strikes for {symbol} exp {expiration_date}"
+            # )
             # Cache as-is (keys will serialize to strings); normalize on read
             cache.set(cache_key, chain, cache_dir=config.CACHE_DIR)
             return chain
@@ -818,7 +820,10 @@ class TastytradeAPI:
             return {}
 
     def get_option_quotes(
-        self, option_symbols: list[str], batch_size: int = 50
+        self,
+        option_symbols: list[str],
+        batch_size: int = 50,
+        force_refresh: bool = False,
     ) -> dict[str, dict]:
         """
         Get quotes for option symbols including bid/ask/greeks
@@ -832,6 +837,9 @@ class TastytradeAPI:
         all_quotes = {}
         to_fetch = []
         for sym in option_symbols:
+            if force_refresh:
+                to_fetch.append(sym)
+                continue
             cached = cache.get(
                 f"optquote:{sym}",
                 ttl_seconds=config.CACHE_TTL_OPTION_QUOTES,
@@ -850,7 +858,8 @@ class TastytradeAPI:
             fetched = self._fetch_option_quotes_batch(to_fetch)
             for k, v in fetched.items():
                 all_quotes[k] = v
-                cache.set(f"optquote:{k}", v, cache_dir=config.CACHE_DIR)
+                if not force_refresh:
+                    cache.set(f"optquote:{k}", v, cache_dir=config.CACHE_DIR)
             return all_quotes
 
         for i in range(0, len(to_fetch), batch_size):
@@ -858,11 +867,83 @@ class TastytradeAPI:
             batch_quotes = self._fetch_option_quotes_batch(batch)
             for k, v in batch_quotes.items():
                 all_quotes[k] = v
-                cache.set(f"optquote:{k}", v, cache_dir=config.CACHE_DIR)
+                if not force_refresh:
+                    cache.set(f"optquote:{k}", v, cache_dir=config.CACHE_DIR)
             if i + batch_size < len(to_fetch):
                 time.sleep(0.2)
 
         return all_quotes
+
+    def build_close_vertical_order(
+        self,
+        *,
+        short_option_symbol: str,
+        long_option_symbol: str,
+        limit_debit: float,
+        quantity: int = 1,
+        time_in_force: str = "Day",
+    ) -> dict[str, object]:
+        """Build a debit limit order to close a short vertical spread."""
+        return {
+            "time-in-force": time_in_force,
+            "order-type": "Limit",
+            "price": round(float(limit_debit), 2),
+            "price-effect": "Debit",
+            "legs": [
+                {
+                    "instrument-type": "Equity Option",
+                    "symbol": short_option_symbol,
+                    "quantity": int(quantity),
+                    "action": "Buy to Close",
+                },
+                {
+                    "instrument-type": "Equity Option",
+                    "symbol": long_option_symbol,
+                    "quantity": int(quantity),
+                    "action": "Sell to Close",
+                },
+            ],
+        }
+
+    def dry_run_order(
+        self,
+        order_payload: dict[str, object],
+        account_number: str | None = None,
+    ) -> dict | None:
+        """Validate an order without submitting it."""
+        if account_number is None:
+            account_number = config.TASTYTRADE_ACCOUNT_NUMBER
+        try:
+            url = f"{self.BASE_URL}/accounts/{account_number}/orders/dry-run"
+            response = self.session.post(url, json=order_payload)
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            print(f"X Order dry-run failed: {e}")
+            response = getattr(e, "response", None)
+            if response is not None:
+                print(f"X Dry-run response body: {response.text}")
+            return None
+
+    def submit_order(
+        self,
+        order_payload: dict[str, object],
+        account_number: str | None = None,
+    ) -> dict | None:
+        """Submit an order to the account."""
+        if account_number is None:
+            account_number = config.TASTYTRADE_ACCOUNT_NUMBER
+        try:
+            url = f"{self.BASE_URL}/accounts/{account_number}/orders"
+            response = self.session.post(url, json=order_payload)
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            print(f"X Order submit failed: {e}")
+            response = getattr(e, "response", None)
+            if response is not None:
+                print(f"X Submit response body: {response.text}")
+            return None
 
     def _fetch_option_quotes_batch(self, option_symbols: list[str]) -> dict[str, dict]:
         """
@@ -997,11 +1078,14 @@ class TastytradeAPI:
         if lookback_days is None:
             lookback_days = config.ORDER_HISTORY_LOOKBACK_DAYS
 
-        normalized_statuses = (
-            {status.strip().lower() for status in statuses if status and status.strip()}
-            if statuses
-            else {"filled"}
-        )
+        if statuses is None:
+            normalized_statuses = {"filled"}
+        else:
+            normalized_statuses = {
+                status.strip().lower()
+                for status in statuses
+                if status and status.strip()
+            }
         cutoff = datetime.now() - timedelta(days=max(int(lookback_days), 0))
 
         try:
@@ -1083,7 +1167,7 @@ class TastytradeAPI:
     def parse_option_spreads(self, positions: list[dict]) -> list[dict]:
         """
         Parse individual option positions into spread pairs
-        Groups short + long puts by underlying symbol and expiration
+        Groups short + long puts/calls by underlying symbol, expiration, and option side
         Returns list of spread dictionaries with entry/current data
         """
         import re
@@ -1094,7 +1178,8 @@ class TastytradeAPI:
             p for p in positions if p.get("instrument-type") == "Equity Option"
         ]
 
-        # Group by underlying + expiration
+        # Group by underlying + expiration + option side. Older versions only matched
+        # puts, which meant call credit spreads never reached trades_open.csv.
         spreads_map = {}
 
         for pos in option_positions:
@@ -1113,20 +1198,23 @@ class TastytradeAPI:
             except Exception:
                 continue
 
-            # Extract strike from option symbol (last 8 chars before decimals)
-            # Format: "STX   260227P00265000" -> strike 265
-            match = re.search(r"P(\d{8})$", option_symbol.replace(" ", ""))
+            # Extract option type and strike from option symbol.
+            # Format: "STX   260227P00265000" -> put strike 265
+            match = re.search(r"([PC])(\d{8})$", option_symbol.replace(" ", ""))
             if not match:
                 continue
-            strike = int(match.group(1)) / 1000  # 00265000 -> 265.0
+            option_type = match.group(1)
+            strike = int(match.group(2)) / 1000  # 00265000 -> 265.0
+            option_side = "put" if option_type == "P" else "call"
 
             # Create spread key
-            spread_key = f"{symbol}_{expiration_date}"
+            spread_key = f"{symbol}_{expiration_date}_{option_side}"
 
             if spread_key not in spreads_map:
                 spreads_map[spread_key] = {
                     "symbol": symbol,
                     "expiration": expiration_date,
+                    "option_side": option_side,
                     "short_legs": [],
                     "long_legs": [],
                 }
@@ -1181,6 +1269,7 @@ class TastytradeAPI:
             for i in range(pair_count):
                 short_leg = short_legs_sorted[i]
                 long_leg = long_legs_sorted[i]
+                option_side = spread_data["option_side"]
 
                 # Calculate metrics
                 entry_credit = (
@@ -1194,7 +1283,7 @@ class TastytradeAPI:
                     (current_pnl / entry_credit * 100) if entry_credit > 0 else 0
                 )
 
-                width = short_leg["strike"] - long_leg["strike"]
+                width = abs(short_leg["strike"] - long_leg["strike"])
                 dte_remaining = (spread_data["expiration"] - today).days
 
                 # Parse entry date from created_at
@@ -1219,6 +1308,14 @@ class TastytradeAPI:
 
                 spread_record = {
                     "trade_id": trade_id,
+                    "strategy_id": f"{option_side}_credit_spread",
+                    "strategy_family": "credit_spread",
+                    "option_side": option_side,
+                    "directional_bias": "bullish"
+                    if option_side == "put"
+                    else "bearish",
+                    "short_leg_type": f"short_{option_side}",
+                    "long_leg_type": f"long_{option_side}",
                     "symbol": spread_data["symbol"],
                     "entry_date": entry_date,
                     "expiration": spread_data["expiration"],

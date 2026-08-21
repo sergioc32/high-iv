@@ -6,6 +6,7 @@ import argparse
 import csv
 import sys
 from collections import defaultdict
+from datetime import date, datetime
 from pathlib import Path
 from statistics import median
 
@@ -73,6 +74,21 @@ def parse_float(value: object) -> float | None:
         return None
     try:
         return float(raw)
+    except ValueError:
+        return None
+
+
+def parse_date(value: object) -> date | None:
+    """Parse an ISO-like date or timestamp into a date."""
+    raw = str(value or "").strip()
+    if raw == "":
+        return None
+    try:
+        return date.fromisoformat(raw[:10])
+    except ValueError:
+        pass
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00")).date()
     except ValueError:
         return None
 
@@ -225,6 +241,30 @@ def summarize_performance(rows: list[dict[str, str]]) -> dict[str, float]:
     }
 
 
+def build_monthly_pnl_rows(rows: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Summarize realized P/L by close month."""
+    grouped: dict[tuple[int, int], list[float]] = defaultdict(list)
+    for row in rows:
+        close_date = parse_date(row.get("close_date"))
+        pnl = parse_float(row.get("profit_loss"))
+        if close_date is None or pnl is None:
+            continue
+        grouped[(close_date.year, close_date.month)].append(pnl)
+
+    monthly_rows: list[dict[str, str]] = []
+    for year_month, pnls in sorted(grouped.items()):
+        year, month = year_month
+        month_start = date(year, month, 1)
+        monthly_rows.append(
+            {
+                "month": month_start.strftime("%B %Y"),
+                "trade_count": str(len(pnls)),
+                "total_pnl": f"{sum(pnls):.2f}",
+            }
+        )
+    return monthly_rows
+
+
 def build_group_summary(
     rows: list[dict[str, str]],
     key_name: str,
@@ -317,6 +357,7 @@ def build_markdown_report(
 ) -> str:
     """Build the trade outcome review markdown."""
     overall = summarize_performance(closed_rows)
+    monthly_pnl_rows = build_monthly_pnl_rows(closed_rows)
     feature_linked_rows = [
         row
         for row in closed_rows
@@ -478,7 +519,22 @@ def build_markdown_report(
         f"- Feature-linked closed trades: {len(feature_linked_rows)}",
         f"- Trade-only closed trades: {len(trade_only_rows)}",
         "",
+        "## Monthly P/L",
     ]
+    lines.extend(
+        markdown_table(
+            ["Month", "Closed Trades", "Total PnL"],
+            [
+                [row["month"], row["trade_count"], row["total_pnl"]]
+                for row in monthly_pnl_rows
+            ],
+        )
+    )
+    lines.extend(
+        [
+            "",
+        ]
+    )
     lines.extend(
         build_exposure_markdown_section(
             exposure_concentration_rows,
@@ -919,6 +975,7 @@ def build_metrics_rows(
     """Build flattened CSV metric rows."""
     rows: list[list[str]] = []
     overall = summarize_performance(closed_rows)
+    monthly_pnl_rows = build_monthly_pnl_rows(closed_rows)
     feature_linked_rows = [
         row
         for row in closed_rows
@@ -932,6 +989,25 @@ def build_metrics_rows(
     ]
     for metric_name, value in overall.items():
         rows.append(["overview", "performance", "all", metric_name, str(value)])
+    for row in monthly_pnl_rows:
+        rows.append(
+            [
+                "monthly_pnl",
+                "close_month",
+                row["month"],
+                "trade_count",
+                row["trade_count"],
+            ]
+        )
+        rows.append(
+            [
+                "monthly_pnl",
+                "close_month",
+                row["month"],
+                "total_pnl",
+                row["total_pnl"],
+            ]
+        )
     for cohort_name, cohort_rows in (
         ("all_closed", closed_rows),
         ("feature_linked", feature_linked_rows),

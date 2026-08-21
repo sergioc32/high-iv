@@ -1071,6 +1071,12 @@ def build_trade_only_row(trade: dict, reason: str) -> dict:
     row: dict = {col: "" for col in OUTPUT_COLUMNS}
 
     row["symbol"] = trade.get("symbol", "")
+    row["strategy_id"] = trade.get("strategy_id", "")
+    row["strategy_family"] = trade.get("strategy_family", "")
+    row["option_side"] = trade.get("option_side", "")
+    row["directional_bias"] = trade.get("directional_bias", "")
+    row["short_leg_type"] = trade.get("short_leg_type", "")
+    row["long_leg_type"] = trade.get("long_leg_type", "")
     row["expiration_date"] = _trade_expiration(trade)
     row["short_strike"] = trade.get("short_strike", "")
     row["long_strike"] = trade.get("long_strike", "")

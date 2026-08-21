@@ -117,6 +117,23 @@ class TrainingDatasetTests(unittest.TestCase):
             self.assertEqual("1", call_row["is_test"])
             self.assertEqual("0.64", call_row["sample_weight"])
 
+    def test_strategy_inference_uses_strike_geometry_when_metadata_is_blank(self):
+        put_row = {"short_strike": "95", "long_strike": "90"}
+        call_row = {"short_strike": "225", "long_strike": "230"}
+        unknown_row = {"short_strike": "", "long_strike": ""}
+
+        self.assertEqual(
+            "put_credit_spread", training_builder.canonical_strategy_id(put_row)
+        )
+        self.assertEqual("put", training_builder.canonical_option_side(put_row))
+        self.assertEqual(
+            "call_credit_spread", training_builder.canonical_strategy_id(call_row)
+        )
+        self.assertEqual("call", training_builder.canonical_option_side(call_row))
+        self.assertEqual(
+            "unknown_strategy", training_builder.canonical_strategy_id(unknown_row)
+        )
+
     def test_render_baseline_report_includes_call_readiness_note_when_needed(
         self,
     ) -> None:

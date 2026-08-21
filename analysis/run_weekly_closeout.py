@@ -204,6 +204,17 @@ def main() -> None:
         ],
         "Running trade outcome review",
     )
+    run_command(
+        [
+            sys.executable,
+            "analysis/order_attempt_review.py",
+            "--reports-dir",
+            str(args.reports_dir),
+            "--top-n",
+            str(args.top_n),
+        ],
+        "Running order attempt review",
+    )
 
     if not args.no_catchup:
         if report_exists(args.reports_dir, args.output_prefix, previous_end):

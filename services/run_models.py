@@ -17,6 +17,7 @@ class PositionSyncResult:
     positions_df: pd.DataFrame | None = None
     display_df: pd.DataFrame | None = None
     profit_targets_df: pd.DataFrame = field(default_factory=pd.DataFrame)
+    loss_close_review_df: pd.DataFrame = field(default_factory=pd.DataFrame)
     dte_warnings_df: pd.DataFrame = field(default_factory=pd.DataFrame)
     exit_alerts_df: pd.DataFrame = field(default_factory=pd.DataFrame)
     trades_file: str = "trades/trades_open.csv"

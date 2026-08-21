@@ -276,6 +276,7 @@ TARGET_PROFIT_PCT = 50  # Target profit percentage
 EXIT_HARD_STOP_MULTIPLE = 2.0  # Close if debit >= multiple * credit received
 EXIT_STRUCTURAL_MULTIPLE = 1.5  # Alert if short strike breached and debit elevated
 EXIT_GAMMA_RISK_DTE = 30  # Alert if short strike breached and DTE <= this
+LOSS_CLOSE_REVIEW_PCT = 95  # Review closing if confirmed loss >= this pct of credit
 ORDER_HISTORY_LOOKBACK_DAYS = 14  # Recent order window for reconciliation
 ORDER_HISTORY_MAX_PAGES = 2  # Default page cap for recent order retrieval
 

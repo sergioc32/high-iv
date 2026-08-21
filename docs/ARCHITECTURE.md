@@ -10,12 +10,24 @@ The application is organized around a thin entrypoint and focused service module
 main.py
   +- SnapshotService
   +- PositionSyncService
-  ¦   +- ClosedTradeReconciliationService
+  |   +- ClosedTradeReconciliationService
   +- ScreenerRunService
-  ¦   +- IVScreener
-  ¦   +- SpreadAnalyzer
-  ¦   +- PersistenceService
+  |   +- IVScreener
+  |   +- SpreadAnalyzer
+  |   +- PersistenceService
   +- SnapshotService
+
+analysis/
+  +- analysis_dataset.csv
+  +- rejected_candidate_dataset.csv
+  +- executed_trade_dataset.csv
+  +- weekly reports
+
+ml/
+  +- training_dataset.csv
+  +- training data audit
+  +- baseline target reports
+  +- put-only baseline model fit
 
 TastytradeAPI
   +- watchlists
@@ -48,9 +60,18 @@ The codebase now separates responsibilities into four main layers:
    - weekly snapshots
    - screener orchestration
 
-4. `screener/` and `analysis/`
+4. `screener/`
    - domain-specific strategy logic
+
+5. `analysis/`
    - offline analytics and reporting
+   - candidate, rejection, and executed-trade datasets
+
+6. `ml/`
+   - leakage-safe model-prep dataset construction
+   - training-readiness audits
+   - baseline supervised experiments and model-score reports
+   - decision support only; not yet live production scoring
 
 ## Components
 
@@ -204,7 +225,69 @@ The codebase now separates responsibilities into four main layers:
 - `run_weekly_pipeline.py`
 - `run_weekly_closeout.py`
 
-## 6. Data Flow
+## 6. Machine Learning Layer (`ml/`)
+
+**Responsibility**: Build and evaluate model-ready datasets from trusted executed-trade history without changing live screener decisions.
+
+The ML layer is currently an offline decision-support layer. It does not place trades, replace the rule-based ranking engine, or directly alter live opportunity selection. Its primary job is to make the data trustworthy enough for supervised modeling and to compare early models against existing heuristic scores.
+
+**Key scripts:**
+- `build_training_dataset.py`
+  - builds `ml/training_dataset.csv` from `analysis/executed_trade_dataset.csv`
+  - includes only closed, reviewed, matched trades with usable labels
+  - keeps model inputs limited to entry-time features
+  - assigns chronological train, validation, and test split flags
+- `training_data_audit.py`
+  - validates schema, label integrity, leakage exclusions, missingness, split ordering, and readiness gates
+  - writes human-readable and machine-readable audit reports under `ml/reports/`
+- `model_score_baseline_report.py`
+  - summarizes target behavior by strategy, provenance, selector output, and alignment score buckets
+  - helps judge whether the current history is large and clean enough for model experiments
+- `fit_put_baseline_model.py`
+  - fits first-pass put-only baseline models for realized return on risk
+  - compares global mean, alignment-only, k-NN, and ridge-style linear candidates
+  - writes metrics and prediction artifacts under `ml/reports/`
+
+### Current ML Design
+
+The current ML architecture is deliberately conservative:
+
+- **Training grain**: one row per eligible executed trade.
+- **Primary label set**: `win_flag`, `realized_return_on_risk`, and realized P/L fields.
+- **Feature policy**: only entry-time fields may be used as model inputs.
+- **Leakage policy**: close-time, P/L, current-position, reconciliation, and other outcome fields are excluded from feature columns.
+- **Split policy**: chronological train/validation/test splits, not random splits.
+- **Quality policy**: actual exits, match quality, feature provenance, and sample weights are tracked so weak labels do not silently dominate model evaluation.
+- **Strategy policy**: put and call spreads should be evaluated separately until enough trusted call-side closed history exists.
+
+### Model Readiness Gates
+
+`training_data_audit.py` currently treats supervised modeling as readiness-gated. Important gates include:
+
+- enough matched closed trades
+- enough losing examples to learn downside behavior
+- enough unique symbols to avoid overfitting one small slice of history
+- high actual-exit coverage
+- low-confidence rows properly downweighted
+- no critical integrity or leakage errors
+- valid chronological train/validation/test splits
+
+Until those gates pass, the ML layer should remain exploratory. Baseline fitting is useful, but live scoring rollout should wait until a candidate model outperforms the existing ranking approach on out-of-time validation.
+
+### ML Outputs
+
+Current ML products include:
+
+- `ml/training_dataset.csv`
+- `ml/reports/training_data_audit.md`
+- `ml/reports/training_data_audit.csv`
+- `ml/reports/model_score_baseline_report.md`
+- `ml/reports/model_score_baseline_report.csv`
+- `ml/reports/put_model_baseline_fit.md`
+- `ml/reports/put_model_baseline_fit_metrics.csv`
+- `ml/reports/put_model_baseline_predictions.csv`
+
+## 7. Data Flow
 
 ### Open Trade Flow
 
@@ -264,7 +347,29 @@ SpreadAnalyzer evaluation
 PersistenceService export + console display
 ```
 
-## 7. Trade Tracking Model
+### Analytics And ML Closeout Flow
+
+```text
+trades + opportunity candidates
+  ?
+analysis/build_analysis_dataset.py
+  ?
+analysis/build_rejected_candidate_dataset.py
+  ?
+analysis/build_executed_trade_dataset.py
+  ?
+ml/build_training_dataset.py
+  ?
+ml/training_data_audit.py
+  ?
+ml/model_score_baseline_report.py
+  ?
+ml/fit_put_baseline_model.py
+```
+
+`analysis/run_weekly_closeout.py` runs this analytics and ML chain before generating weekly reports and reviews.
+
+## 8. Trade Tracking Model
 
 ### Open Trades
 
@@ -288,7 +393,7 @@ This means the system still detects the event of closure by snapshot diffing, bu
 
 For accurate realized economics, the system prefers actual leg-fill-derived net close values.
 
-## 8. Configuration Areas
+## 9. Configuration Areas
 
 `config.py` currently groups configuration into:
 - screening thresholds
@@ -303,7 +408,7 @@ Relevant trade-tracking settings:
 - `ORDER_HISTORY_LOOKBACK_DAYS`
 - `ORDER_HISTORY_MAX_PAGES`
 
-## 9. Key Files Added in the Current Refactor
+## 10. Key Files Added in the Current Refactor
 
 - `services/position_sync_service.py`
 - `services/snapshot_service.py`
@@ -314,22 +419,29 @@ Relevant trade-tracking settings:
 - `screener/spread_models.py`
 - `screener/spread_scoring.py`
 - `screener/spread_logging.py`
+- `ml/build_training_dataset.py`
+- `ml/training_data_audit.py`
+- `ml/model_score_baseline_report.py`
+- `ml/fit_put_baseline_model.py`
 
-## 10. Design Notes
+## 11. Design Notes
 
 - `main.py` is intentionally small and orchestration-focused.
 - Normal trade reconciliation should remain lightweight and incremental.
 - Historical cleanup is intentionally separated into a one-off tool so normal runtime stays fast.
 - Actual close values should prefer fill-derived economics over submitted order limits.
+- ML is currently offline and evidence-gathering oriented; rule-based guardrails remain the live decision boundary.
+- Supervised model promotion should require out-of-time validation that beats the current heuristic/ranking baseline.
 
-## 11. Future Enhancements
+## 12. Future Enhancements
 
 - add more tests around backfill and reconciliation edge cases
 - support partial closes and more complex roll scenarios
 - optionally add explicit backfill modes for already-populated actual rows
 - continue building analytics datasets now that realized exits are more trustworthy
+- add a production model-scoring path only after the ML readiness gates and validation benchmarks pass
 
 ---
 
-**Last Updated**: April 17, 2026  
-**Version**: 2.2
+**Last Updated**: July 2, 2026<br>
+**Version**: 2.3

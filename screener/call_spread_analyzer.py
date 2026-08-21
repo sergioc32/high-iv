@@ -708,11 +708,6 @@ class CallSpreadAnalyzer(PutSpreadAnalyzer):
                         rejection_data
                     )
                     self.log_rejections(debug_symbol, rejection_data)
-                    rejection_summary = self._format_rejection_summary(rejection_data)
-                    print(
-                        f"\n   x {debug_symbol}: No valid call spreads found. Rejections: "
-                        f"{rejection_summary}"
-                    )
             return None
 
         selection = self._select_best_candidate(

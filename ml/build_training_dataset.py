@@ -219,7 +219,37 @@ def canonical_strategy_id(row: dict[str, str]) -> str:
     if directional_bias == "bearish":
         return "call_credit_spread"
 
-    return "put_credit_spread"
+    short_leg_type = (row.get("short_leg_type") or "").strip().lower()
+    long_leg_type = (row.get("long_leg_type") or "").strip().lower()
+    if short_leg_type == "short_put" or long_leg_type == "long_put":
+        return "put_credit_spread"
+    if short_leg_type == "short_call" or long_leg_type == "long_call":
+        return "call_credit_spread"
+
+    short_strike = parse_float(row.get("short_strike"))
+    long_strike = parse_float(row.get("long_strike"))
+    if short_strike is not None and long_strike is not None:
+        if short_strike > long_strike:
+            return "put_credit_spread"
+        if short_strike < long_strike:
+            return "call_credit_spread"
+
+    return "unknown_strategy"
+
+
+def canonical_option_side(row: dict[str, str]) -> str:
+    """Resolve option side from explicit fields, strategy, leg types, or geometry."""
+    option_side = (row.get("option_side") or "").strip().lower()
+    if option_side in {"put", "call"}:
+        return option_side
+
+    strategy_id = canonical_strategy_id(row)
+    if strategy_id == "put_credit_spread":
+        return "put"
+    if strategy_id == "call_credit_spread":
+        return "call"
+
+    return ""
 
 
 def as_bool(value: object) -> bool:
@@ -430,7 +460,10 @@ def build_output_row(row: dict[str, str]) -> dict[str, object]:
             output[column] = row.get(column, "")
 
     for column in FEATURE_COLUMNS:
-        output[column] = row.get(column, "")
+        if column == "option_side":
+            output[column] = canonical_option_side(row)
+        else:
+            output[column] = row.get(column, "")
 
     if not str(output.get("strategy_id") or "").strip():
         output["strategy_id"] = canonical_strategy_id(row)
@@ -473,6 +506,7 @@ def build_training_dataset(
         and (row.get("max_loss") or "").strip() != ""
         and (row.get("match_status") or "").strip().lower() in INCLUDED_MATCH_STATUSES
         and as_bool(row.get("reviewed_setup_found"))
+        and canonical_strategy_id(row) in {"put_credit_spread", "call_credit_spread"}
     ]
 
     output_rows = [build_output_row(row) for row in closed_rows]
